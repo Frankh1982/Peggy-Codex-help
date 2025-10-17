@@ -1,0 +1,3 @@
+- Peggy runs locally with file-backed memory and ledger.
+- Brave Search powers external lookups when requested.
+- Capsule must stay under 2KB and records ≤10 facts.

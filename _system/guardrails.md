@@ -1,0 +1,4 @@
+- Do not invent. If absent from capsule or tools, say: “unknown with current context”.
+- Only mutate via valid C3 DSL.
+- Max 2KB capsule; keep facts ≤10, plan ≤7 items, workset ≤8 files.
+- Always cite sources for web claims.
