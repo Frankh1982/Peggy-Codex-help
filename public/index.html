@@ -6,25 +6,37 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root { color-scheme: dark light; }
-    body{margin:0;background:#0f1115;color:#eaeef2;font-family:system-ui,Segoe UI,Arial}
-    header{display:flex;justify-content:space-between;align-items:center;padding:16px 20px;font-weight:700}
-    #hash{background:#1f2937;padding:6px 10px;border-radius:12px;font-size:12px}
-    #log{height:70vh;overflow:auto;padding:16px 20px;white-space:pre-wrap;border-top:1px solid #20232b;border-bottom:1px solid #20232b}
-    form{display:flex;gap:8px;padding:12px 20px}
-    textarea{flex:1;min-height:44px;resize:vertical;background:#111522;color:#eaeef2;border:1px solid #22293a;border-radius:10px;padding:10px}
-    button{background:#2563eb;color:white;border:0;border-radius:10px;padding:10px 16px;font-weight:600;cursor:pointer}
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #0f1115; color: #eaeef2; font-family: system-ui, Segoe UI, Arial; }
+    header { display:flex; justify-content:space-between; align-items:center; padding:16px 20px; font-weight:700; border-bottom:1px solid #20232b; }
+    #hash { background:#1f2937; padding:6px 10px; border-radius:12px; font-size:12px }
+    #wrap { display:flex; flex-direction:column; height:100vh; }
+    #log { flex:1; overflow:auto; padding: 16px 20px; }
+    .msg { max-width: 900px; margin: 8px auto; display:flex; gap:10px; }
+    .msg.user { justify-content: flex-end; }
+    .bubble { padding:12px 14px; border-radius:14px; white-space:pre-wrap; line-height:1.35 }
+    .user .bubble { background:#1c2a43; }
+    .assistant .bubble { background:#141a26; border:1px solid #22293a; }
+    .system { text-align:center; opacity:.8; font-size:12px }
+    form { display:flex; gap:10px; padding: 12px 20px; border-top:1px solid #20232b; }
+    textarea { flex:1; min-height:44px; resize:vertical; background:#111522; color:#eaeef2; border:1px solid #22293a; border-radius:10px; padding:10px }
+    button { background:#2563eb; color:white; border:0; border-radius:10px; padding:10px 16px; font-weight:600; cursor:pointer }
+    button:disabled { opacity:.6; cursor:not-allowed }
+    .typing { font-style: italic; opacity:.8; }
   </style>
 </head>
 <body>
-  <header>
-    <div>Peggy — Critical Partner</div>
-    <div id="hash">hash: --</div>
-  </header>
-  <div id="log"></div>
-  <form id="chat">
-    <textarea id="msg" placeholder="Ask Peggy..."></textarea>
-    <button type="submit">Send</button>
-  </form>
+  <div id="wrap">
+    <header>
+      <div>Peggy — Critical Partner</div>
+      <div id="hash">hash: --</div>
+    </header>
+    <div id="log"></div>
+    <form id="chat">
+      <textarea id="msg" placeholder="Ask Peggy… (Enter to send, Shift+Enter for newline)"></textarea>
+      <button id="send" type="submit">Send</button>
+    </form>
+  </div>
   <script src="/client.js"></script>
 </body>
 </html>
