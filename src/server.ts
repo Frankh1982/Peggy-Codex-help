@@ -6,7 +6,25 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import OpenAI from 'openai';
-import { initMemory, readProfile, writeProfile, readState, bumpState, appendChat, appendLog, headerLine, parseNameIntent, asksForName } from './lib/memory';
+import {
+  initMemory,
+  ensureRules,
+  readProfile,
+  writeProfile,
+  readState,
+  bumpState,
+  appendChat,
+  appendLog,
+  headerLine,
+  parseNameIntent,
+  asksForName,
+  setPref,
+  listPrefs,
+  addRule,
+  delRule,
+  listRules,
+  rulesHash,
+} from './lib/memory';
 
 const PORT = Number(process.env.PORT || 5173);
 const MODEL = process.env.MODEL || 'gpt-4o-mini';
@@ -24,6 +42,7 @@ function readPersona(): string {
 function send(ws: any, obj: unknown) { try { ws.send(JSON.stringify(obj)); } catch {} }
 
 initMemory();
+ensureRules();
 
 const app = express();
 app.use(express.static('public'));
@@ -44,9 +63,28 @@ wss.on('connection', (ws) => {
 
     const profile = readProfile();
     const state = readState();
+    const lowerText = text.trim().toLowerCase();
 
     // Always log user msg
     appendChat('user', text);
+
+    // Helper to stream deterministic replies
+    const streamReply = (reply: string) => {
+      send(ws, { type: 'assistant_start' });
+      const lines = reply.split(/(\n)/);
+      for (const part of lines) {
+        if (!part) continue;
+        send(ws, { type: 'assistant_chunk', text: part });
+      }
+      send(ws, { type: 'assistant', text: reply });
+      appendChat('assistant', reply);
+    };
+
+    const streamWithMem = (reply: string) => {
+      streamReply(reply);
+      const st = bumpState();
+      send(ws, { type: 'mem', rev: st.rev });
+    };
 
     // 1) Name set intent (deterministic, no model call)
     const setTo = parseNameIntent(text);
@@ -76,7 +114,186 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // 3) Model path with compact header
+    // 3) Capability card (deterministic)
+    if (/^what can you do\??$/i.test(lowerText)) {
+      const card = [
+        'Adjustable prefs:',
+        '- verbosity (0–3): “set verbosity to 0/1/2/3”, or “be more/less verbose”',
+        '- anti-sycophancy (on/off): “toggle anti-sycophancy”, “be more/less agreeable”',
+        '- tone (direct/neutral/friendly): “set tone to friendly”',
+        '- formality (low/med/high): “set formality to high”',
+        '- guard (strict/normal): “set guard to strict”',
+        '',
+        'Durable rules (sectioned):',
+        '- “remember that I never want cilantro in my recipes”  → preferences',
+        '- “remember that I always want you to greet me with my name” → style',
+        '- “remember that I only want codex responses and no code” → output',
+        'Also: “add a rule to <section>: <text>”, “remove the rule from <section>: <text>”, “list my rules”',
+        '',
+        'Ask: “list my prefs” to see current settings.',
+      ].join('\n');
+      streamReply(card);
+      return;
+    }
+
+    // 4) Preference setters
+    const prefMatch = lowerText.match(/^set verbosity to\s+(\d)\b/);
+    if (prefMatch) {
+      const target = Math.max(0, Math.min(3, Number(prefMatch[1])));
+      setPref('verbosity', target);
+      appendLog('pref_set', { key: 'verbosity', value: target });
+      streamWithMem(`Verbosity set to ${target}.`);
+      return;
+    }
+
+    if (/\bbe more verbose\b/.test(lowerText) || /\bbe less verbose\b/.test(lowerText)) {
+      const current = profile.prefs.verbosity;
+      const delta = /\bbe more verbose\b/.test(lowerText) ? 1 : -1;
+      const target = Math.max(0, Math.min(3, current + delta));
+      setPref('verbosity', target);
+      appendLog('pref_set', { key: 'verbosity', value: target });
+      streamWithMem(`Verbosity set to ${target}.`);
+      return;
+    }
+
+    if (/\btoggle\s+anti-?sycophancy\b/.test(lowerText)) {
+      const current = profile.prefs.syc;
+      const next = !current;
+      setPref('syc', next);
+      appendLog('pref_set', { key: 'syc', value: next });
+      streamWithMem(`Anti-sycophancy ${next ? 'enabled' : 'disabled'}.`);
+      return;
+    }
+
+    const sycSwitch = lowerText.match(/anti-?sycophancy\s+(on|off)\b/);
+    if (sycSwitch) {
+      const next = sycSwitch[1] === 'on';
+      setPref('syc', next);
+      appendLog('pref_set', { key: 'syc', value: next });
+      streamWithMem(`Anti-sycophancy ${next ? 'enabled' : 'disabled'}.`);
+      return;
+    }
+
+    if (/\bbe more agreeable\b/.test(lowerText) || /\bbe less agreeable\b/.test(lowerText)) {
+      const next = /\bbe less agreeable\b/.test(lowerText);
+      setPref('syc', next);
+      appendLog('pref_set', { key: 'syc', value: next });
+      streamWithMem(`Anti-sycophancy ${next ? 'enabled' : 'disabled'}.`);
+      return;
+    }
+
+    const toneMatch = lowerText.match(/set tone to\s+(direct|neutral|friendly)\b/);
+    if (toneMatch) {
+      const val = toneMatch[1] as 'direct' | 'neutral' | 'friendly';
+      setPref('tone', val);
+      appendLog('pref_set', { key: 'tone', value: val });
+      streamWithMem(`Tone set to ${val}.`);
+      return;
+    }
+
+    const formalityMatch = lowerText.match(/set formality to\s+(low|med|high)\b/);
+    if (formalityMatch) {
+      const val = formalityMatch[1] as 'low' | 'med' | 'high';
+      setPref('formality', val);
+      appendLog('pref_set', { key: 'formality', value: val });
+      streamWithMem(`Formality set to ${val}.`);
+      return;
+    }
+
+    const guardMatch = lowerText.match(/set guard to\s+(strict|normal)\b/);
+    if (guardMatch) {
+      const val = guardMatch[1] as 'strict' | 'normal';
+      setPref('guard', val);
+      appendLog('pref_set', { key: 'guard', value: val });
+      streamWithMem(`Guard set to ${val}.`);
+      return;
+    }
+
+    // 5) Preference queries
+    if (/^list my prefs$/.test(lowerText)) {
+      const prefs = listPrefs();
+      const summary = JSON.stringify(prefs);
+      streamReply(summary);
+      return;
+    }
+
+    // 6) Rules add via "remember"
+    const rememberMatch = text.match(/remember that\s+(.+)/i);
+    if (rememberMatch) {
+      const rawRule = rememberMatch[1];
+      const normalized = rawRule.trim().replace(/[.]+$/, '').replace(/\s+/g, ' ');
+      const lowered = normalized.toLowerCase();
+      let section = 'preferences';
+      if (/(greet|greeting|name)/i.test(lowered)) {
+        section = 'style';
+      } else if (/(codex|code)/i.test(lowered)) {
+        section = 'output';
+      } else if (/(recipe|food|ingredient|cilantro)/i.test(lowered)) {
+        section = 'preferences';
+      }
+      try {
+        addRule(section, normalized);
+        appendLog('rule_add', { section, text: normalized });
+        streamWithMem(`Added rule to ${section}: "${normalized}".`);
+      } catch (err: any) {
+        streamReply(`Could not add rule: ${err?.message || String(err)}.`);
+      }
+      return;
+    }
+
+    const addRuleMatch = text.match(/add a rule to\s+(\w+):\s+(.+)/i);
+    if (addRuleMatch) {
+      const section = addRuleMatch[1].trim().toLowerCase();
+      const normalized = addRuleMatch[2].trim().replace(/[.]+$/, '').replace(/\s+/g, ' ');
+      try {
+        addRule(section, normalized);
+        appendLog('rule_add', { section, text: normalized });
+        streamWithMem(`Added rule to ${section}: "${normalized}".`);
+      } catch (err: any) {
+        streamReply(`Could not add rule: ${err?.message || String(err)}.`);
+      }
+      return;
+    }
+
+    const removeRuleMatch = text.match(/remove the rule from\s+(\w+):\s+(.+)/i);
+    if (removeRuleMatch) {
+      const section = removeRuleMatch[1].trim().toLowerCase();
+      const normalized = removeRuleMatch[2].trim().replace(/[.]+$/, '').replace(/\s+/g, ' ');
+      const before = JSON.stringify(listRules());
+      delRule(section, normalized);
+      const after = JSON.stringify(listRules());
+      if (before !== after) {
+        appendLog('rule_del', { section, text: normalized });
+        streamWithMem(`Removed rule from ${section}: "${normalized}".`);
+      } else {
+        streamReply(`No matching rule found in ${section}: "${normalized}".`);
+      }
+      return;
+    }
+
+    if (/^list my rules$/.test(lowerText)) {
+      const rules = listRules();
+      const headerLineText = `rules rev ${rules.rev} rs=${rulesHash()}`;
+      const lines = [headerLineText];
+      for (const section of rules.sections) {
+        const entries = section.items.slice(0, 5);
+        lines.push(`${section.id}:`);
+        if (entries.length === 0) {
+          lines.push('- (none)');
+        } else {
+          for (const item of entries) {
+            lines.push(`- ${item}`);
+          }
+          if (section.items.length > entries.length) {
+            lines.push(`- … (${section.items.length - entries.length} more)`);
+          }
+        }
+      }
+      streamReply(lines.join('\n'));
+      return;
+    }
+
+    // 7) Model path with compact header
     const header = headerLine(profile, state.rev);
     send(ws, { type: 'assistant_start' });
 
