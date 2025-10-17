@@ -1,0 +1,6 @@
+Loader v1 — Repo: <URL>. Capsule is pasted below verbatim.
+Obey guardrails. Allowed lookups: {one ledger event by index OR one file in active_workset}.
+If needed action isn’t representable in C3, respond only with:
+```c3
+(ASSERT "unsupported-operation")
+```

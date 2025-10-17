@@ -1,0 +1,3 @@
+- (P1) Review capsule deltas before each response.
+- (P2) Capture ledger-worthy events deterministically.
+- (P3) Verify sources before surfacing external claims.

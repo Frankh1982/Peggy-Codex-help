@@ -1,15 +1,110 @@
-﻿<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>Peggy Helper — Minimal Chat</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>body{font-family:sans-serif;margin:20px} #log{white-space:pre-wrap;border:1px solid #ccc;padding:10px;height:50vh;overflow:auto}</style>
-</head>
-<body>
-  <h1>Peggy Helper — Minimal Chat</h1>
-  <div id="log"></div>
-  <form id="f"><input id="t" style="width:80%" placeholder="Type a message…" /><button>Send</button></form>
-  <script src="/client.js"></script>
-</body>
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Peggy Codex Helper</title>
+    <style>
+      body {
+        font-family: "Segoe UI", sans-serif;
+        margin: 0;
+        background: #0f1115;
+        color: #f4f4f5;
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+      }
+      header {
+        padding: 12px 20px;
+        background: #161920;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border-bottom: 1px solid #252932;
+      }
+      .hash-badge {
+        background: #1f6feb;
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+      }
+      main {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      #transcript {
+        flex: 1;
+        overflow-y: auto;
+        padding: 20px;
+      }
+      .bubble {
+        margin-bottom: 18px;
+        padding: 12px 14px;
+        border-radius: 10px;
+        max-width: 620px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+      }
+      .user {
+        background: #1f2933;
+        align-self: flex-end;
+      }
+      .assistant {
+        background: #21262d;
+        border: 1px solid #2f353f;
+      }
+      form {
+        padding: 16px 20px;
+        background: #161920;
+        border-top: 1px solid #252932;
+        display: flex;
+        gap: 12px;
+      }
+      textarea {
+        flex: 1;
+        min-height: 60px;
+        resize: vertical;
+        background: #0f1115;
+        border: 1px solid #2f353f;
+        color: inherit;
+        padding: 10px;
+        border-radius: 8px;
+      }
+      button {
+        background: #1f6feb;
+        color: #fff;
+        border: none;
+        border-radius: 8px;
+        padding: 12px 20px;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+      .sources {
+        margin-top: 10px;
+        font-size: 13px;
+      }
+      .sources a {
+        color: #58a6ff;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Peggy — Critical Partner</h1>
+      <div class="hash-badge" id="capsule-hash">hash: --</div>
+    </header>
+    <main>
+      <div id="transcript"></div>
+    </main>
+    <form id="chat-form">
+      <textarea id="chat-input" placeholder="Ask Peggy..." required></textarea>
+      <button type="submit">Send</button>
+    </form>
+    <script type="module" src="./client.js"></script>
+  </body>
 </html>

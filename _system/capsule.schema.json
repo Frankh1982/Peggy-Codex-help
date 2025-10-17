@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "project_id": { "type": "string" },
+    "repo_url": { "type": "string" },
+    "version": { "type": "string" },
+    "goal": { "type": "string", "maxLength": 140 },
+    "plan": {
+      "type": "array",
+      "items": { "type": "string" },
+      "maxItems": 7
+    },
+    "active_workset": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "sha8": { "type": "string" },
+          "purpose": { "type": "string" }
+        },
+        "required": ["path", "sha8", "purpose"],
+        "additionalProperties": false
+      },
+      "maxItems": 8
+    },
+    "facts": {
+      "type": "array",
+      "items": { "type": "string" },
+      "maxItems": 10
+    },
+    "open_decisions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "maxItems": 5
+    },
+    "last_5_events": {
+      "type": "array",
+      "items": { "type": "string" },
+      "maxItems": 5
+    },
+    "capsule_hash": { "type": "string" }
+  },
+  "required": [
+    "project_id",
+    "repo_url",
+    "version",
+    "goal",
+    "plan",
+    "active_workset",
+    "facts",
+    "open_decisions",
+    "last_5_events",
+    "capsule_hash"
+  ],
+  "additionalProperties": false
+}
