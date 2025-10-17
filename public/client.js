@@ -3,6 +3,7 @@ const form   = document.getElementById('chat');
 const input  = document.getElementById('msg');
 const sendBtn= document.getElementById('send');
 const hashEl = document.getElementById('hash');
+const memEl  = document.getElementById('mem');
 
 const ws = new WebSocket(location.origin.replace(/^http/, 'ws') + '/chat');
 
@@ -49,6 +50,7 @@ ws.addEventListener('message', (ev) => {
   try { payload = JSON.parse(ev.data); } catch { payload = { type:'raw', text:String(ev.data) }; }
 
   if (payload.type === 'hash')     { hashEl.textContent = 'hash: ' + payload.value; return; }
+  if (payload.type === 'mem')      { memEl.textContent  = 'mem: '  + payload.rev; return; }
   if (payload.type === 'system')   { const r=make('div','system',payload.text); logEl.appendChild(r); scrollBottom(); return; }
 
   if (payload.type === 'assistant_start'){ sendBtn.disabled=true; startTyping(); return; }
