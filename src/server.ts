@@ -12,6 +12,7 @@ import {
   readProfile,
   writeProfile,
   readState,
+  writeState,
   bumpState,
   appendChat,
   appendLog,
@@ -25,6 +26,9 @@ import {
   delRule,
   listRules,
   rulesHash,
+  appendProgressEntry,
+  readProgressEntries,
+  getRecentChatLines,
 } from './lib/memory';
 
 function postProcess(
@@ -119,6 +123,7 @@ type SettingsPayload = {
   prefs: ReturnType<typeof getPrefs>;
   rs: string;
   rules_counts: SettingsCounts;
+  active_goal: string | null;
 };
 
 function buildSettingsPayload(stateOverride?: ReturnType<typeof readState>): SettingsPayload {
@@ -137,6 +142,7 @@ function buildSettingsPayload(stateOverride?: ReturnType<typeof readState>): Set
     prefs,
     rs: rulesHash(),
     rules_counts: counts,
+    active_goal: state.active_goal ?? null,
   };
 }
 
@@ -169,6 +175,7 @@ const wss = new WebSocketServer({ server, path: '/chat' });
 wss.on('connection', (ws) => {
   const runHash = crypto.randomBytes(4).toString('hex');
   const st0 = readState();
+  let chattyFollowUps = 0;
   send(ws, { type: 'system', text: 'ready.' });
   send(ws, { type: 'hash', value: runHash });
   send(ws, { type: 'mem', rev: st0.rev });
@@ -182,6 +189,7 @@ wss.on('connection', (ws) => {
     const profile = readProfile();
     const state = readState();
     const lowerText = text.trim().toLowerCase();
+    chattyFollowUps = 0;
 
     // Always log user msg
     appendChat('user', text);
@@ -207,6 +215,27 @@ wss.on('connection', (ws) => {
       if (options.sendSettings) {
         sendSettingsUpdate(ws, st);
       }
+    };
+
+    const sendChattyFollowUp = () => {
+      const followUp = 'Need more depth here, or pivot elsewhere?';
+      send(ws, { type: 'assistant_start' });
+      send(ws, { type: 'assistant_chunk', text: followUp });
+      send(ws, { type: 'assistant', text: followUp });
+      appendChat('assistant', followUp);
+      chattyFollowUps += 1;
+    };
+
+    const maybeSendChattyFollowUp = () => {
+      const prefsNow = getPrefs();
+      if (prefsNow.chatty !== 1) {
+        chattyFollowUps = 0;
+        return;
+      }
+      if (chattyFollowUps >= 2) {
+        return;
+      }
+      sendChattyFollowUp();
     };
 
     // 1) Name set intent (deterministic, no model call)
@@ -324,6 +353,18 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    const chattySwitch = lowerText.match(/^chatty\s+(on|off)$/);
+    if (chattySwitch) {
+      const next = chattySwitch[1] === 'on' ? 1 : 0;
+      setPref('chatty', next);
+      appendLog('pref_set', { key: 'chatty', value: next });
+      streamReply(`Chatty: ${next ? 'on' : 'off'}.`);
+      const st = bumpState();
+      send(ws, { type: 'mem', rev: st.rev });
+      sendSettingsUpdate(ws, st);
+      return;
+    }
+
     // 5) Preference queries
     if (/^list my prefs$/.test(lowerText)) {
       const prefs = listPrefs();
@@ -415,6 +456,88 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    const activeGoalMatch = text.match(/^set active goal to\s+([A-Za-z0-9][\w\-]*)$/i);
+    if (activeGoalMatch) {
+      const slug = activeGoalMatch[1].trim().toLowerCase();
+      const updated = {
+        ...state,
+        rev: state.rev + 1,
+        last_seen: new Date().toISOString(),
+        active_goal: slug,
+      };
+      writeState(updated);
+      appendLog('goal_set', { active_goal: slug });
+      streamReply(`Active goal set to ${slug}.`);
+      send(ws, { type: 'mem', rev: updated.rev });
+      sendSettingsUpdate(ws, updated);
+      return;
+    }
+
+    const checkpointMatch = text.match(/^checkpoint:\s*(.+)$/i);
+    if (checkpointMatch) {
+      const note = checkpointMatch[1].trim();
+      if (!note) {
+        streamReply('Please provide a checkpoint note.');
+        return;
+      }
+      appendProgressEntry(note);
+      const st = bumpState();
+      streamReply('Checkpoint saved.');
+      send(ws, { type: 'mem', rev: st.rev });
+      return;
+    }
+
+    if (lowerText === 'list progress') {
+      const entries = readProgressEntries(5);
+      const reply = entries.length ? entries.join('\n') : 'No progress logged yet.';
+      streamReply(reply, { skipPostProcess: true });
+      return;
+    }
+
+    if (lowerText === 'summarize session') {
+      const recent = getRecentChatLines(30).filter((line) => line.role === 'user' || line.role === 'assistant');
+      if (recent.length <= 1) {
+        streamReply('Not enough conversation history to summarize.');
+        return;
+      }
+      const trimmed = recent.slice(0, -1);
+      const window = trimmed.slice(-10);
+      if (window.length === 0) {
+        streamReply('Not enough conversation history to summarize.');
+        return;
+      }
+      const transcript = window
+        .map((entry) => `${entry.role === 'user' ? 'User' : 'Assistant'}: ${entry.content}`)
+        .join('\n');
+      try {
+        const prompt = `${text.trim()}\n\nRecent conversation (chronological):\n${transcript}\n\nProvide a clear summary in 90-120 words.`;
+        const completion = await openai.chat.completions.create({
+          model: MODEL,
+          messages: [
+            { role: 'system', content: readPersona() },
+            { role: 'system', content: headerLine(profile, state.rev) },
+            { role: 'user', content: prompt },
+          ],
+        });
+        const summary = completion.choices?.[0]?.message?.content?.trim();
+        if (!summary) {
+          streamReply('Summary request failed.');
+          return;
+        }
+        const words = summary.split(/\s+/).filter(Boolean);
+        const limited = words.length > 120 ? words.slice(0, 120).join(' ') : summary;
+        appendProgressEntry(`Summary: ${limited}`);
+        const st = bumpState();
+        const firstSentenceMatch = limited.match(/[^.!?]+[.!?]/);
+        const firstSentence = (firstSentenceMatch ? firstSentenceMatch[0] : limited.split(/\n/)[0] || limited).trim();
+        streamReply(`${firstSentence} (saved)`);
+        send(ws, { type: 'mem', rev: st.rev });
+      } catch (err: any) {
+        streamReply(`Could not summarize: ${err?.message || String(err)}.`);
+      }
+      return;
+    }
+
     // Guard behavior for unknown personal data
     const guardSensitive = text.match(/\b(my|mine)\s+(shoe size|birthday|age|height|weight|phone|email|address)\b/i);
     if (guardSensitive) {
@@ -471,6 +594,7 @@ wss.on('connection', (ws) => {
       appendChat('assistant', processed);
       const st = bumpState();
       send(ws, { type: 'mem', rev: st.rev });
+      maybeSendChattyFollowUp();
 
     } catch (err: any) {
       const processed = applyPostProcess('unknown with current context (model error).');

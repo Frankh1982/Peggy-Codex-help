@@ -9,12 +9,13 @@ export type Prefs = {
   tone: 'direct' | 'neutral' | 'friendly';
   formality: 'low' | 'med' | 'high';
   guard: 'strict' | 'normal';
+  chatty: 0 | 1;
 };
 
 export type Profile = { name: string | null; prefs: Prefs };
 export type RulesSection = { id: string; items: string[] };
 export type RulesStore = { rev: number; sections: RulesSection[] };
-export type AgentState = { rev: number; last_seen: string };
+export type AgentState = { rev: number; last_seen: string; active_goal: string | null };
 
 const root = process.cwd();
 const memDir = path.join(root, 'memory');
@@ -23,6 +24,10 @@ const agentDir = path.join(memDir, 'agent');
 const chatDir = path.join(memDir, 'chat');
 const logsDir = path.join(root, 'logs');
 const rulesPath = path.join(agentDir, 'rules.json');
+const statePath = path.join(agentDir, 'state.json');
+const goalsPath = path.join(agentDir, 'goals.md');
+const planPath = path.join(agentDir, 'plan.md');
+const progressPath = path.join(agentDir, 'progress.md');
 
 const defaultPrefs: Prefs = {
   verbosity: 1,
@@ -30,6 +35,7 @@ const defaultPrefs: Prefs = {
   tone: 'direct',
   formality: 'low',
   guard: 'strict',
+  chatty: 0,
 };
 
 const defaultSections: RulesSection[] = [
@@ -53,7 +59,8 @@ function normalizePrefs(prefs: Partial<Prefs> | undefined): Prefs {
   const verbCandidate = typeof candidate.verbosity === 'number' ? candidate.verbosity : Number(candidate.verbosity);
   const verbosity = Number.isFinite(verbCandidate) ? verbCandidate : defaultPrefs.verbosity;
   normalized.verbosity = Math.max(0, Math.min(3, Math.round(verbosity))) as Prefs['verbosity'];
-  const sycCandidate = typeof candidate.syc === 'string' ? candidate.syc.toLowerCase() : candidate.syc;
+  const sycSource = (candidate as any).syc;
+  const sycCandidate = typeof sycSource === 'string' ? sycSource.toLowerCase() : sycSource;
   if (typeof sycCandidate === 'boolean') {
     normalized.syc = sycCandidate;
   } else if (typeof sycCandidate === 'string') {
@@ -70,6 +77,17 @@ function normalizePrefs(prefs: Partial<Prefs> | undefined): Prefs {
   const guardAllowed: Prefs['guard'][] = ['strict', 'normal'];
   const guardCandidate = typeof candidate.guard === 'string' ? candidate.guard.toLowerCase() : '';
   normalized.guard = guardAllowed.includes(guardCandidate as Prefs['guard']) ? (guardCandidate as Prefs['guard']) : defaultPrefs.guard;
+  const chattyCandidate = (candidate as any).chatty;
+  if (typeof chattyCandidate === 'number') {
+    normalized.chatty = chattyCandidate >= 1 ? 1 : 0;
+  } else if (typeof chattyCandidate === 'boolean') {
+    normalized.chatty = chattyCandidate ? 1 : 0;
+  } else if (typeof chattyCandidate === 'string') {
+    const lower = chattyCandidate.toLowerCase();
+    normalized.chatty = ['1', 'true', 'yes', 'on'].includes(lower) ? 1 : 0;
+  } else {
+    normalized.chatty = defaultPrefs.chatty;
+  }
   return normalized;
 }
 
@@ -91,13 +109,16 @@ function writeRulesFile(rules: RulesStore){
 export function initMemory() {
   mkdirp(userDir); mkdirp(agentDir); mkdirp(chatDir); mkdirp(logsDir);
   const profilePath = path.join(userDir, 'profile.json');
-  const statePath   = path.join(agentDir,'state.json');
   if (!fs.existsSync(profilePath)) {
     fs.writeFileSync(profilePath, JSON.stringify({ name: null, prefs: { ...defaultPrefs } } as Profile, null, 2));
   }
   if (!fs.existsSync(statePath)) {
-    fs.writeFileSync(statePath, JSON.stringify({ rev: 1, last_seen: new Date().toISOString() } as AgentState, null, 2));
+    const initial: AgentState = { rev: 1, last_seen: new Date().toISOString(), active_goal: null };
+    fs.writeFileSync(statePath, JSON.stringify(initial, null, 2));
   }
+  ensureFile(goalsPath);
+  ensureFile(planPath);
+  ensureFile(progressPath);
   ensureRules();
 }
 
@@ -120,7 +141,8 @@ export function getPrefs(): Prefs {
   const formality = ((p as any).prefs?.formality ?? 'low') as Prefs['formality'];
   const guard = ((p as any).prefs?.guard ?? 'strict') as Prefs['guard'];
   const syc = ((p as any).prefs?.syc ?? true) as Prefs['syc'];
-  return { verbosity, tone, formality, guard, syc };
+  const chatty = Number((p as any).prefs?.chatty ?? 0) >= 1 ? 1 : 0;
+  return { verbosity, tone, formality, guard, syc, chatty };
 }
 
 export function listPrefs(): Prefs {
@@ -166,21 +188,112 @@ export function setPref(key: PrefKey, value: unknown) {
       prefs.guard = allowed.includes(str as Prefs['guard']) ? (str as Prefs['guard']) : defaultPrefs.guard;
       break;
     }
+    case 'chatty': {
+      if (typeof value === 'string') {
+        const lower = value.toLowerCase();
+        prefs.chatty = ['1', 'true', 'yes', 'on'].includes(lower) ? 1 : 0;
+      } else if (typeof value === 'number') {
+        prefs.chatty = value >= 1 ? 1 : 0;
+      } else {
+        prefs.chatty = value ? 1 : 0;
+      }
+      break;
+    }
   }
   profile.prefs = prefs;
   writeProfile(profile);
   appendLog('op', { op: 'PREF', key, value: profile.prefs[key] });
 }
 
-export function readState(): AgentState {
-  return JSON.parse(fs.readFileSync(path.join(agentDir,'state.json'),'utf8'));
+function ensureFile(p: string) {
+  if (!fs.existsSync(p)) {
+    fs.writeFileSync(p, '');
+  }
 }
+
+export function readState(): AgentState {
+  if (!fs.existsSync(statePath)) {
+    const fallback: AgentState = { rev: 1, last_seen: new Date().toISOString(), active_goal: null };
+    fs.writeFileSync(statePath, JSON.stringify(fallback, null, 2));
+    return fallback;
+  }
+  const raw = JSON.parse(fs.readFileSync(statePath, 'utf8')) as Partial<AgentState>;
+  const normalized: AgentState = {
+    rev: typeof raw.rev === 'number' ? raw.rev : 1,
+    last_seen: typeof raw.last_seen === 'string' ? raw.last_seen : new Date().toISOString(),
+    active_goal: typeof raw.active_goal === 'string' ? raw.active_goal : null,
+  };
+  if (
+    normalized.rev !== raw.rev ||
+    normalized.last_seen !== raw.last_seen ||
+    normalized.active_goal !== raw.active_goal
+  ) {
+    writeState(normalized);
+  }
+  return normalized;
+}
+
+export function writeState(state: AgentState) {
+  fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
+}
+
 export function bumpState(){
   const st = readState();
   st.rev += 1;
   st.last_seen = new Date().toISOString();
-  fs.writeFileSync(path.join(agentDir,'state.json'), JSON.stringify(st));
+  writeState(st);
   return st;
+}
+
+function timestamp(){
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+}
+
+export function appendProgressEntry(note: string) {
+  ensureFile(progressPath);
+  const line = `- [${timestamp()}] ${note.trim()}`;
+  fs.appendFileSync(progressPath, line + '\n');
+  appendLog('progress', { note: note.trim() });
+  return line;
+}
+
+export function readProgressEntries(limit: number): string[] {
+  ensureFile(progressPath);
+  const raw = fs.readFileSync(progressPath, 'utf8');
+  const lines = raw.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  if (limit <= 0) return lines;
+  return lines.slice(-limit);
+}
+
+export type ChatLine = { role: 'user' | 'assistant' | 'system'; content: string };
+
+export function getRecentChatLines(limit: number): ChatLine[] {
+  if (limit <= 0) return [];
+  const files = fs
+    .readdirSync(chatDir, { withFileTypes: true })
+    .filter(entry => entry.isFile() && /^chat-\d{4}-\d{2}-\d{2}\.ndjson$/.test(entry.name))
+    .map(entry => entry.name)
+    .sort()
+    .reverse();
+  const collected: ChatLine[] = [];
+  for (const file of files) {
+    const full = fs.readFileSync(path.join(chatDir, file), 'utf8');
+    const rows = full.split(/\r?\n/).filter(Boolean);
+    for (let i = rows.length - 1; i >= 0; i -= 1) {
+      try {
+        const parsed = JSON.parse(rows[i]) as { role?: string; content?: string };
+        if (!parsed?.role || !parsed?.content) continue;
+        if (parsed.role !== 'user' && parsed.role !== 'assistant' && parsed.role !== 'system') continue;
+        collected.push({ role: parsed.role, content: parsed.content });
+        if (collected.length >= limit) {
+          return collected.reverse();
+        }
+      } catch {}
+    }
+  }
+  return collected.reverse();
 }
 
 export function appendChat(role: 'user'|'assistant'|'system', content: string){
@@ -203,6 +316,7 @@ export function headerLine(p: Profile, rev: number){
     `rev=${rev}`,
     `v=${prefs.verbosity}`,
     `syc=${prefs.syc?1:0}`,
+    `c=${prefs.chatty}`,
     `t=${toneMap[prefs.tone]}`,
     `f=${formalityMap[prefs.formality]}`,
     `g=${guardMap[prefs.guard]}`,
