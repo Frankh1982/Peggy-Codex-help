@@ -70,8 +70,18 @@ function postProcess(
     finalText = `${profile.name} — ${finalText}`;
   }
   // no cilantro
-  if (has('preferences', ['never', 'cilantro'])) {
+  const cilantroRule = has('preferences', ['never', 'cilantro']);
+  if (cilantroRule) {
     finalText = finalText.replace(/\b(cilantro|coriander)\b/gi, 'parsley');
+    const noteNeeded =
+      /Ingredients/i.test(finalText) ||
+      finalText
+        .split(/\n/)
+        .filter((line) => line.trimStart().startsWith('-'))
+        .length >= 2;
+    if (noteNeeded && !/cilantro avoided per your preference/i.test(finalText)) {
+      finalText += '\n\n(Note: cilantro avoided per your preference; substituted with parsley.)';
+    }
   }
   // codex-only (no code fences)
   if (has('output', ['only', 'codex', 'no code'])) {
@@ -103,6 +113,51 @@ function readPersona(): string {
 
 function send(ws: any, obj: unknown) { try { ws.send(JSON.stringify(obj)); } catch {} }
 
+type SettingsCounts = { style: number; preferences: number; output: number };
+type SettingsPayload = {
+  rev: number;
+  prefs: ReturnType<typeof getPrefs>;
+  rs: string;
+  rules_counts: SettingsCounts;
+};
+
+function buildSettingsPayload(stateOverride?: ReturnType<typeof readState>): SettingsPayload {
+  const state = stateOverride ?? readState();
+  const prefs = getPrefs();
+  const rules = listRules();
+  const counts: SettingsCounts = { style: 0, preferences: 0, output: 0 };
+  for (const section of rules.sections ?? []) {
+    const key = section.id?.toLowerCase() as keyof SettingsCounts | undefined;
+    if (key && key in counts) {
+      counts[key] = section.items.length;
+    }
+  }
+  return {
+    rev: state.rev,
+    prefs,
+    rs: rulesHash(),
+    rules_counts: counts,
+  };
+}
+
+function sendSettingsUpdate(ws: any, stateOverride?: ReturnType<typeof readState>) {
+  const value = buildSettingsPayload(stateOverride);
+  send(ws, { type: 'settings', value });
+  return value;
+}
+
+function hasCilantroPreferenceRule(): boolean {
+  const rules = listRules();
+  return !!(rules.sections ?? []).find(
+    (section) =>
+      section.id?.toLowerCase() === 'preferences' &&
+      section.items?.some((item) => {
+        const lower = item.toLowerCase();
+        return lower.includes('never') && lower.includes('cilantro');
+      }),
+  );
+}
+
 initMemory();
 ensureRules();
 
@@ -117,6 +172,7 @@ wss.on('connection', (ws) => {
   send(ws, { type: 'system', text: 'ready.' });
   send(ws, { type: 'hash', value: runHash });
   send(ws, { type: 'mem', rev: st0.rev });
+  sendSettingsUpdate(ws, st0);
 
   ws.on('message', async (data: Buffer) => {
     // normalize input
@@ -131,8 +187,9 @@ wss.on('connection', (ws) => {
     appendChat('user', text);
 
     // Helper to stream deterministic replies
-    const streamReply = (reply: string) => {
-      const processed = applyPostProcess(reply);
+    type StreamOptions = { skipPostProcess?: boolean; sendSettings?: boolean };
+    const streamReply = (reply: string, options: StreamOptions = {}) => {
+      const processed = options.skipPostProcess ? reply : applyPostProcess(reply);
       send(ws, { type: 'assistant_start' });
       const lines = processed.split(/(\n)/);
       for (const part of lines) {
@@ -143,10 +200,13 @@ wss.on('connection', (ws) => {
       appendChat('assistant', processed);
     };
 
-    const streamWithMem = (reply: string) => {
-      streamReply(reply);
+    const streamWithMem = (reply: string, options: StreamOptions = {}) => {
+      streamReply(reply, options);
       const st = bumpState();
       send(ws, { type: 'mem', rev: st.rev });
+      if (options.sendSettings) {
+        sendSettingsUpdate(ws, st);
+      }
     };
 
     // 1) Name set intent (deterministic, no model call)
@@ -156,7 +216,7 @@ wss.on('connection', (ws) => {
       profile.name = setTo;
       writeProfile(profile);
       appendLog('name_set', { before, after: setTo });
-      streamWithMem(`Noted. I’ll use ${setTo}.`);
+      streamWithMem(`Noted. I’ll use ${setTo}.`, { sendSettings: true });
       return;
     }
 
@@ -197,7 +257,7 @@ wss.on('connection', (ws) => {
       const target = Math.max(0, Math.min(3, Number(prefMatch[1])));
       setPref('verbosity', target);
       appendLog('pref_set', { key: 'verbosity', value: target });
-      streamWithMem(`Verbosity set to ${target}.`);
+      streamWithMem(`Verbosity set to ${target}.`, { sendSettings: true });
       return;
     }
 
@@ -207,7 +267,7 @@ wss.on('connection', (ws) => {
       const target = Math.max(0, Math.min(3, current + delta));
       setPref('verbosity', target);
       appendLog('pref_set', { key: 'verbosity', value: target });
-      streamWithMem(`Verbosity set to ${target}.`);
+      streamWithMem(`Verbosity set to ${target}.`, { sendSettings: true });
       return;
     }
 
@@ -216,7 +276,7 @@ wss.on('connection', (ws) => {
       const next = !current;
       setPref('syc', next);
       appendLog('pref_set', { key: 'syc', value: next });
-      streamWithMem(`Anti-sycophancy ${next ? 'enabled' : 'disabled'}.`);
+      streamWithMem(`Anti-sycophancy ${next ? 'enabled' : 'disabled'}.`, { sendSettings: true });
       return;
     }
 
@@ -225,7 +285,7 @@ wss.on('connection', (ws) => {
       const next = sycSwitch[1] === 'on';
       setPref('syc', next);
       appendLog('pref_set', { key: 'syc', value: next });
-      streamWithMem(`Anti-sycophancy ${next ? 'enabled' : 'disabled'}.`);
+      streamWithMem(`Anti-sycophancy ${next ? 'enabled' : 'disabled'}.`, { sendSettings: true });
       return;
     }
 
@@ -233,7 +293,7 @@ wss.on('connection', (ws) => {
       const next = /\bbe less agreeable\b/.test(lowerText);
       setPref('syc', next);
       appendLog('pref_set', { key: 'syc', value: next });
-      streamWithMem(`Anti-sycophancy ${next ? 'enabled' : 'disabled'}.`);
+      streamWithMem(`Anti-sycophancy ${next ? 'enabled' : 'disabled'}.`, { sendSettings: true });
       return;
     }
 
@@ -242,7 +302,7 @@ wss.on('connection', (ws) => {
       const val = toneMatch[1] as 'direct' | 'neutral' | 'friendly';
       setPref('tone', val);
       appendLog('pref_set', { key: 'tone', value: val });
-      streamWithMem(`Tone set to ${val}.`);
+      streamWithMem(`Tone set to ${val}.`, { sendSettings: true });
       return;
     }
 
@@ -251,7 +311,7 @@ wss.on('connection', (ws) => {
       const val = formalityMatch[1] as 'low' | 'med' | 'high';
       setPref('formality', val);
       appendLog('pref_set', { key: 'formality', value: val });
-      streamWithMem(`Formality set to ${val}.`);
+      streamWithMem(`Formality set to ${val}.`, { sendSettings: true });
       return;
     }
 
@@ -260,7 +320,7 @@ wss.on('connection', (ws) => {
       const val = guardMatch[1] as 'strict' | 'normal';
       setPref('guard', val);
       appendLog('pref_set', { key: 'guard', value: val });
-      streamWithMem(`Guard set to ${val}.`);
+      streamWithMem(`Guard set to ${val}.`, { sendSettings: true });
       return;
     }
 
@@ -269,6 +329,13 @@ wss.on('connection', (ws) => {
       const prefs = listPrefs();
       const summary = JSON.stringify(prefs);
       streamReply(summary);
+      return;
+    }
+
+    if (/^show settings$/.test(lowerText)) {
+      const payload = buildSettingsPayload();
+      const json = JSON.stringify(payload, null, 2);
+      streamReply(json, { skipPostProcess: true });
       return;
     }
 
@@ -289,7 +356,7 @@ wss.on('connection', (ws) => {
       try {
         addRule(section, normalized);
         appendLog('rule_add', { section, text: normalized });
-        streamWithMem(`Added rule to ${section}: "${normalized}".`);
+        streamWithMem(`Added rule to ${section}: "${normalized}".`, { sendSettings: true });
       } catch (err: any) {
         streamReply(`Could not add rule: ${err?.message || String(err)}.`);
       }
@@ -303,7 +370,7 @@ wss.on('connection', (ws) => {
       try {
         addRule(section, normalized);
         appendLog('rule_add', { section, text: normalized });
-        streamWithMem(`Added rule to ${section}: "${normalized}".`);
+        streamWithMem(`Added rule to ${section}: "${normalized}".`, { sendSettings: true });
       } catch (err: any) {
         streamReply(`Could not add rule: ${err?.message || String(err)}.`);
       }
@@ -319,7 +386,7 @@ wss.on('connection', (ws) => {
       const after = JSON.stringify(listRules());
       if (before !== after) {
         appendLog('rule_del', { section, text: normalized });
-        streamWithMem(`Removed rule from ${section}: "${normalized}".`);
+        streamWithMem(`Removed rule from ${section}: "${normalized}".`, { sendSettings: true });
       } else {
         streamReply(`No matching rule found in ${section}: "${normalized}".`);
       }
@@ -362,6 +429,18 @@ wss.on('connection', (ws) => {
         streamWithMem(reply);
         return;
       }
+    }
+
+    if (/^(no cilantro\?|did you avoid cilantro\??)$/.test(lowerText)) {
+      const hasRule = hasCilantroPreferenceRule();
+      if (hasRule) {
+        streamReply('Yes — cilantro is avoided and replaced with parsley per your preference.', {
+          skipPostProcess: true,
+        });
+      } else {
+        streamReply('No rule set. Say: "remember that I never want cilantro in my recipes".');
+      }
+      return;
     }
 
     // 7) Model path with compact header
