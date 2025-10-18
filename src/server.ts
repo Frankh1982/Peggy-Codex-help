@@ -26,6 +26,7 @@ import {
   delRule,
   listRules,
   rulesHash,
+  ruleCounts,
   appendProgressEntry,
   readProgressEntries,
   getRecentChatLines,
@@ -77,12 +78,9 @@ function postProcess(
   const cilantroRule = has('preferences', ['never', 'cilantro']);
   if (cilantroRule) {
     finalText = finalText.replace(/\b(cilantro|coriander)\b/gi, 'parsley');
-    const noteNeeded =
-      /Ingredients/i.test(finalText) ||
-      finalText
-        .split(/\n/)
-        .filter((line) => line.trimStart().startsWith('-'))
-        .length >= 2;
+    const hasIngredientsHeading = /Ingredients/i.test(finalText);
+    const hasBulletLine = /^\s*-\s+/m.test(finalText);
+    const noteNeeded = hasIngredientsHeading && hasBulletLine;
     if (noteNeeded && !/cilantro avoided per your preference/i.test(finalText)) {
       finalText += '\n\n(Note: cilantro avoided per your preference; substituted with parsley.)';
     }
@@ -117,6 +115,11 @@ function readPersona(): string {
 
 function send(ws: any, obj: unknown) { try { ws.send(JSON.stringify(obj)); } catch {} }
 
+function normalizeRuleInput(text: string): string {
+  if (typeof text !== 'string') return '';
+  return text.replace(/\s+/g, ' ').trim().replace(/[.]+$/, '').trim();
+}
+
 type SettingsCounts = { style: number; preferences: number; output: number };
 type SettingsPayload = {
   rev: number;
@@ -129,14 +132,7 @@ type SettingsPayload = {
 function buildSettingsPayload(stateOverride?: ReturnType<typeof readState>): SettingsPayload {
   const state = stateOverride ?? readState();
   const prefs = getPrefs();
-  const rules = listRules();
-  const counts: SettingsCounts = { style: 0, preferences: 0, output: 0 };
-  for (const section of rules.sections ?? []) {
-    const key = section.id?.toLowerCase() as keyof SettingsCounts | undefined;
-    if (key && key in counts) {
-      counts[key] = section.items.length;
-    }
-  }
+  const counts = ruleCounts();
   return {
     rev: state.rev,
     prefs,
@@ -384,7 +380,11 @@ wss.on('connection', (ws) => {
     const rememberMatch = text.match(/remember that\s+(.+)/i);
     if (rememberMatch) {
       const rawRule = rememberMatch[1];
-      const normalized = rawRule.trim().replace(/[.]+$/, '').replace(/\s+/g, ' ');
+      const normalized = normalizeRuleInput(rawRule);
+      if (!normalized) {
+        streamReply('Please provide a rule to remember.');
+        return;
+      }
       const lowered = normalized.toLowerCase();
       let section = 'preferences';
       if (/(greet|greeting|name)/i.test(lowered)) {
@@ -407,7 +407,11 @@ wss.on('connection', (ws) => {
     const addRuleMatch = text.match(/add a rule to\s+(\w+):\s+(.+)/i);
     if (addRuleMatch) {
       const section = addRuleMatch[1].trim().toLowerCase();
-      const normalized = addRuleMatch[2].trim().replace(/[.]+$/, '').replace(/\s+/g, ' ');
+      const normalized = normalizeRuleInput(addRuleMatch[2]);
+      if (!normalized) {
+        streamReply('Please provide rule text to add.');
+        return;
+      }
       try {
         addRule(section, normalized);
         appendLog('rule_add', { section, text: normalized });
@@ -421,7 +425,11 @@ wss.on('connection', (ws) => {
     const removeRuleMatch = text.match(/remove the rule from\s+(\w+):\s+(.+)/i);
     if (removeRuleMatch) {
       const section = removeRuleMatch[1].trim().toLowerCase();
-      const normalized = removeRuleMatch[2].trim().replace(/[.]+$/, '').replace(/\s+/g, ' ');
+      const normalized = normalizeRuleInput(removeRuleMatch[2]);
+      if (!normalized) {
+        streamReply('Please specify which rule to remove.');
+        return;
+      }
       const before = JSON.stringify(listRules());
       delRule(section, normalized);
       const after = JSON.stringify(listRules());
@@ -554,15 +562,12 @@ wss.on('connection', (ws) => {
       }
     }
 
-    if (/^(no cilantro\?|did you avoid cilantro\??)$/.test(lowerText)) {
+    if (/^no cilantro\??$/i.test(text.trim())) {
       const hasRule = hasCilantroPreferenceRule();
-      if (hasRule) {
-        streamReply('Yes — cilantro is avoided and replaced with parsley per your preference.', {
-          skipPostProcess: true,
-        });
-      } else {
-        streamReply('No rule set. Say: "remember that I never want cilantro in my recipes".');
-      }
+      const reply = hasRule
+        ? 'Yes — cilantro is avoided and replaced with parsley per your preference.'
+        : 'No rule set. Say: "remember that I never want cilantro in my recipes".';
+      streamReply(reply, { skipPostProcess: true });
       return;
     }
 
