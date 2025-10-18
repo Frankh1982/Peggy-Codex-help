@@ -114,7 +114,13 @@ export function writeProfile(p: Profile){
 }
 
 export function getPrefs(): Prefs {
-  return { ...readProfile().prefs };
+  const p = readProfile();
+  const verbosity = Math.max(0, Math.min(3, Number((p as any).prefs?.verbosity ?? 1))) as Prefs['verbosity'];
+  const tone = ((p as any).prefs?.tone ?? 'direct') as Prefs['tone'];
+  const formality = ((p as any).prefs?.formality ?? 'low') as Prefs['formality'];
+  const guard = ((p as any).prefs?.guard ?? 'strict') as Prefs['guard'];
+  const syc = ((p as any).prefs?.syc ?? true) as Prefs['syc'];
+  return { verbosity, tone, formality, guard, syc };
 }
 
 export function listPrefs(): Prefs {
@@ -213,7 +219,9 @@ export function ensureRules(): RulesStore {
 }
 
 export function listRules(): RulesStore {
-  return cloneRules(ensureRules());
+  ensureRules();
+  const fp = path.join(agentDir, 'rules.json');
+  return JSON.parse(fs.readFileSync(fp, 'utf8')) as RulesStore;
 }
 
 export function addRule(section: string, text: string){
