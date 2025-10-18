@@ -20,11 +20,73 @@ import {
   asksForName,
   setPref,
   listPrefs,
+  getPrefs,
   addRule,
   delRule,
   listRules,
   rulesHash,
 } from './lib/memory';
+
+function postProcess(
+  finalText: string,
+  profile: ReturnType<typeof readProfile>,
+  prefs: ReturnType<typeof getPrefs>,
+  rules: ReturnType<typeof listRules>,
+): string {
+  const limits = [20, 60, 90, 180];
+  const vIdx = Math.max(0, Math.min(3, prefs.verbosity ?? 1));
+  const cap = limits[vIdx];
+
+  // 1) enforce verbosity (word cap)
+  const words = finalText.split(/\s+/);
+  if (words.length > cap) finalText = words.slice(0, cap).join(' ') + '…';
+
+  // 2) tone
+  if (prefs.tone === 'direct') {
+    finalText = finalText.replace(/^(?:Sure|Happy to help|Absolutely|Of course|Gladly)[—,: ]\s*/i, '');
+  } else if (prefs.tone === 'friendly') {
+    if (!/^(Sure|Happy to help|Absolutely|Of course|Gladly)[—,: ]\s*/i.test(finalText)) {
+      finalText = `Sure — ${finalText}`;
+    }
+  }
+
+  // 3) anti-sycophancy (syc=true means anti is ON)
+  if (prefs.syc === true) {
+    const deny = /(great question|brilliant|excellent point|i[’']m impressed|fantastic idea)/gi;
+    finalText = finalText.replace(deny, '').replace(/\s{2,}/g, ' ').trim();
+  }
+
+  // 4) rules
+  const rs = rules.sections || [];
+  const has = (id: string, substrs: string[]) =>
+    !!rs.find(
+      (s) =>
+        s.id?.toLowerCase() === id &&
+        s.items?.some((x: string) => substrs.every((k) => x.toLowerCase().includes(k))),
+    );
+
+  // greet by name
+  if (profile.name && has('style', ['greet', 'name'])) {
+    finalText = `${profile.name} — ${finalText}`;
+  }
+  // no cilantro
+  if (has('preferences', ['never', 'cilantro'])) {
+    finalText = finalText.replace(/\b(cilantro|coriander)\b/gi, 'parsley');
+  }
+  // codex-only (no code fences)
+  if (has('output', ['only', 'codex', 'no code'])) {
+    finalText = finalText.replace(/```[\s\S]*?```/g, '').trim();
+  }
+
+  return finalText;
+}
+
+function applyPostProcess(text: string): string {
+  const prefs = getPrefs();
+  const rules = listRules();
+  const profile = readProfile();
+  return postProcess(text, profile, prefs, rules);
+}
 
 const PORT = Number(process.env.PORT || 5173);
 const MODEL = process.env.MODEL || 'gpt-4o-mini';
@@ -70,14 +132,15 @@ wss.on('connection', (ws) => {
 
     // Helper to stream deterministic replies
     const streamReply = (reply: string) => {
+      const processed = applyPostProcess(reply);
       send(ws, { type: 'assistant_start' });
-      const lines = reply.split(/(\n)/);
+      const lines = processed.split(/(\n)/);
       for (const part of lines) {
         if (!part) continue;
         send(ws, { type: 'assistant_chunk', text: part });
       }
-      send(ws, { type: 'assistant', text: reply });
-      appendChat('assistant', reply);
+      send(ws, { type: 'assistant', text: processed });
+      appendChat('assistant', processed);
     };
 
     const streamWithMem = (reply: string) => {
@@ -92,25 +155,17 @@ wss.on('connection', (ws) => {
       const before = profile.name;
       profile.name = setTo;
       writeProfile(profile);
-      const st = bumpState();
       appendLog('name_set', { before, after: setTo });
-      send(ws, { type: 'assistant_start' });
-      send(ws, { type: 'assistant_chunk', text: `Noted. I’ll use ${setTo}.` });
-      send(ws, { type: 'assistant', text: `Noted. I’ll use ${setTo}.` });
-      appendChat('assistant', `Noted. I’ll use ${setTo}.`);
-      send(ws, { type: 'mem', rev: st.rev });
+      streamWithMem(`Noted. I’ll use ${setTo}.`);
       return;
     }
 
     // 2) Name query (deterministic, no model call)
     if (asksForName(text)) {
-      const reply = profile.name ? `Your name is ${profile.name}.` : `unknown with current context. Say: "set my name to Frank".`;
-      const st = bumpState();
-      send(ws, { type: 'assistant_start' });
-      send(ws, { type: 'assistant_chunk', text: reply });
-      send(ws, { type: 'assistant', text: reply });
-      appendChat('assistant', reply);
-      send(ws, { type: 'mem', rev: st.rev });
+      const reply = profile.name
+        ? `Your name is ${profile.name}.`
+        : `unknown with current context. Say: "set my name to Frank".`;
+      streamWithMem(reply);
       return;
     }
 
@@ -293,6 +348,22 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    // Guard behavior for unknown personal data
+    const guardSensitive = text.match(/\b(my|mine)\s+(shoe size|birthday|age|height|weight|phone|email|address)\b/i);
+    if (guardSensitive) {
+      const field = guardSensitive[2].toLowerCase();
+      const known = (profile as any)[field];
+      if (known == null) {
+        const prefsNow = getPrefs();
+        const reply =
+          prefsNow.guard === 'normal'
+            ? `What is your ${field}?`
+            : `unknown with current context. Provide one minimal fact (e.g., your ${field}).`;
+        streamWithMem(reply);
+        return;
+      }
+    }
+
     // 7) Model path with compact header
     const header = headerLine(profile, state.rev);
     send(ws, { type: 'assistant_start' });
@@ -316,13 +387,16 @@ wss.on('connection', (ws) => {
         send(ws, { type: 'assistant_chunk', text: delta });
       }
 
-      send(ws, { type: 'assistant', text: full });
-      appendChat('assistant', full);
+      const processed = applyPostProcess(full);
+      send(ws, { type: 'assistant', text: processed });
+      appendChat('assistant', processed);
       const st = bumpState();
       send(ws, { type: 'mem', rev: st.rev });
 
     } catch (err: any) {
-      send(ws, { type: 'assistant', text: 'unknown with current context (model error).'});
+      const processed = applyPostProcess('unknown with current context (model error).');
+      send(ws, { type: 'assistant', text: processed });
+      appendChat('assistant', processed);
       send(ws, { type: 'system', text: `openai error: ${err?.message || String(err)}` });
       appendLog('error', { where: 'openai', msg: err?.message || String(err) });
     }
