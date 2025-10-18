@@ -30,6 +30,9 @@ import {
   appendProgressEntry,
   readProgressEntries,
   getRecentChatLines,
+  readScratch,
+  writeScratch,
+  resetScratch,
 } from './lib/memory';
 
 function postProcess(
@@ -111,6 +114,71 @@ function readPersona(): string {
   } catch {
     return 'You are a candid, concise assistant. Prefer "unknown with current context".';
   }
+}
+
+function toKebabCase(input: string): string {
+  return input
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function tidyFragment(text: string): string {
+  return text.replace(/\s+/g, ' ').replace(/[\s.,!?;:]+$/g, '').trim();
+}
+
+function extractRecipeName(text: string): string | null {
+  const recipeFor = text.match(/recipe\s+for\s+([^?.!]+)/i);
+  if (recipeFor) {
+    const name = tidyFragment(recipeFor[1]);
+    if (name) return name;
+  }
+  const needRecipe = text.match(/(?:need|want|looking for|find|get|share|show me|give me|make)\s+(?:an?|the)?\s*([^?.!]+?)\s+recipe\b/i);
+  if (needRecipe) {
+    const name = tidyFragment(needRecipe[1]);
+    if (name) return name;
+  }
+  const trailing = text.match(/([A-Za-z0-9][^?.!]+?)\s+recipe\b/i);
+  if (trailing) {
+    const name = tidyFragment(trailing[1]);
+    if (name) return name;
+  }
+  return null;
+}
+
+function articleFor(phrase: string): 'a' | 'an' {
+  return /^[aeiou]/i.test(phrase.trim()) ? 'an' : 'a';
+}
+
+function recordRecipeIntent(message: string) {
+  const recipe = extractRecipeName(message);
+  if (!recipe) return;
+  writeScratch((scratch) => {
+    const normalized = recipe.replace(/^(?:a|an|the)\s+/i, '').trim();
+    if (!normalized) return scratch;
+    const topic = normalized.length > 40 ? `${normalized.slice(0, 37)}…` : normalized;
+    const nextTopics = scratch.last_topics.filter((item) => item !== topic);
+    nextTopics.push(topic);
+    while (nextTopics.length > 6) nextTopics.shift();
+    return {
+      ...scratch,
+      last_recipe: normalized,
+      last_topics: nextTopics,
+    };
+  });
+}
+
+function recordExplainIntent(message: string) {
+  const match = message.trim().match(/^explain\s+(.+)/i);
+  if (!match) return;
+  const query = tidyFragment(match[1]);
+  if (!query) return;
+  writeScratch((scratch) => ({
+    ...scratch,
+    last_query: query,
+  }));
 }
 
 function send(ws: any, obj: unknown) { try { ws.send(JSON.stringify(obj)); } catch {} }
@@ -195,6 +263,8 @@ wss.on('connection', (ws) => {
 
     // Always log user msg
     appendChat('user', text);
+    recordRecipeIntent(text);
+    recordExplainIntent(text);
 
     // Helper to stream deterministic replies
     type StreamOptions = { skipPostProcess?: boolean; sendSettings?: boolean };
@@ -388,6 +458,27 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    if (/^what did i ask for last\??$/.test(lowerText)) {
+      const scratch = readScratch();
+      if (scratch.last_recipe) {
+        const article = articleFor(scratch.last_recipe);
+        streamReply(`Your last request was ${article} ${scratch.last_recipe} recipe.`);
+      } else if (scratch.last_query) {
+        const questionText = /[.!?]$/.test(scratch.last_query) ? scratch.last_query : `${scratch.last_query}.`;
+        streamReply(`Your last question was: ${questionText}`);
+      } else {
+        streamReply('Unknown with current context.');
+      }
+      return;
+    }
+
+    if (/^clear scratch$/.test(lowerText)) {
+      resetScratch();
+      appendLog('scratch_reset', {});
+      streamWithMem('Scratch cleared.');
+      return;
+    }
+
     // 6) Rules add via "remember"
     const rememberMatch = text.match(/remember that\s+(.+)/i);
     if (rememberMatch) {
@@ -476,9 +567,14 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    const activeGoalMatch = text.match(/^set active goal to\s+([A-Za-z0-9][\w\-]*)$/i);
+    const activeGoalMatch = text.match(/^set active goal to\s+(.+)$/i);
     if (activeGoalMatch) {
-      const slug = activeGoalMatch[1].trim().toLowerCase();
+      const rawGoal = activeGoalMatch[1].trim();
+      const slug = toKebabCase(rawGoal);
+      if (!slug) {
+        streamReply('Please provide a goal name to set.');
+        return;
+      }
       const updated = {
         ...state,
         rev: state.rev + 1,

@@ -21,13 +21,25 @@ const root = process.cwd();
 const memDir = path.join(root, 'memory');
 const userDir = path.join(memDir, 'user');
 const agentDir = path.join(memDir, 'agent');
-const chatDir = path.join(memDir, 'chat');
 const logsDir = path.join(root, 'logs');
 const rulesPath = path.join(agentDir, 'rules.json');
 const statePath = path.join(agentDir, 'state.json');
 const goalsPath = path.join(agentDir, 'goals.md');
 const planPath = path.join(agentDir, 'plan.md');
 const progressPath = path.join(agentDir, 'progress.md');
+const scratchPath = path.join(agentDir, 'scratch.json');
+
+export type ScratchState = {
+  last_topics: string[];
+  last_recipe: string | null;
+  last_query: string | null;
+};
+
+const defaultScratch: ScratchState = {
+  last_topics: [],
+  last_recipe: null,
+  last_query: null,
+};
 
 const defaultPrefs: Prefs = {
   verbosity: 1,
@@ -52,6 +64,34 @@ const defaultRules: RulesStore = {
 function mkdirp(p: string){ fs.mkdirSync(p, { recursive: true }); }
 function today(){ const d=new Date(); return d.toISOString().slice(0,10); }
 function sha8(s: string){ return crypto.createHash('sha256').update(s).digest('hex').slice(0,8); }
+
+function truncateSnippet(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= 120) return trimmed;
+  return trimmed.slice(0, 117).trimEnd() + '…';
+}
+
+function normalizeScratch(input: Partial<ScratchState> | undefined): ScratchState {
+  const candidate = input ?? {};
+  const topics = Array.isArray(candidate.last_topics) ? candidate.last_topics : [];
+  const normalizedTopics = topics
+    .map((topic) => (typeof topic === 'string' ? topic.trim() : ''))
+    .filter(Boolean)
+    .slice(-6);
+  const lastRecipe = typeof candidate.last_recipe === 'string' ? candidate.last_recipe.trim() : null;
+  const lastQuery = typeof candidate.last_query === 'string' ? candidate.last_query.trim() : null;
+  return {
+    last_topics: normalizedTopics,
+    last_recipe: lastRecipe && lastRecipe.length > 0 ? lastRecipe : null,
+    last_query: lastQuery && lastQuery.length > 0 ? lastQuery : null,
+  };
+}
+
+function ensureScratchFile() {
+  if (!fs.existsSync(scratchPath)) {
+    fs.writeFileSync(scratchPath, JSON.stringify(defaultScratch, null, 2));
+  }
+}
 
 function normalizePrefs(prefs: Partial<Prefs> | undefined): Prefs {
   const candidate = prefs ?? {};
@@ -107,7 +147,7 @@ function writeRulesFile(rules: RulesStore){
 }
 
 export function initMemory() {
-  mkdirp(userDir); mkdirp(agentDir); mkdirp(chatDir); mkdirp(logsDir);
+  mkdirp(userDir); mkdirp(agentDir); mkdirp(logsDir);
   const profilePath = path.join(userDir, 'profile.json');
   if (!fs.existsSync(profilePath)) {
     fs.writeFileSync(profilePath, JSON.stringify({ name: null, prefs: { ...defaultPrefs } } as Profile, null, 2));
@@ -120,6 +160,7 @@ export function initMemory() {
   ensureFile(planPath);
   ensureFile(progressPath);
   ensureRules();
+  ensureScratchFile();
 }
 
 export function readProfile(): Profile {
@@ -211,6 +252,32 @@ function ensureFile(p: string) {
   }
 }
 
+export function readScratch(): ScratchState {
+  ensureScratchFile();
+  try {
+    const raw = JSON.parse(fs.readFileSync(scratchPath, 'utf8')) as Partial<ScratchState>;
+    return normalizeScratch(raw);
+  } catch {
+    fs.writeFileSync(scratchPath, JSON.stringify(defaultScratch, null, 2));
+    return { ...defaultScratch };
+  }
+}
+
+export function writeScratch(
+  updater: (current: ScratchState) => ScratchState | void,
+): ScratchState {
+  const current = readScratch();
+  const draft = updater ? updater({ ...current, last_topics: [...current.last_topics] }) || current : current;
+  const normalized = normalizeScratch(draft);
+  fs.writeFileSync(scratchPath, JSON.stringify(normalized, null, 2));
+  return normalized;
+}
+
+export function resetScratch(): ScratchState {
+  fs.writeFileSync(scratchPath, JSON.stringify(defaultScratch, null, 2));
+  return { ...defaultScratch };
+}
+
 export function readState(): AgentState {
   if (!fs.existsSync(statePath)) {
     const fallback: AgentState = { rev: 1, last_seen: new Date().toISOString(), active_goal: null };
@@ -272,21 +339,27 @@ export type ChatLine = { role: 'user' | 'assistant' | 'system'; content: string 
 export function getRecentChatLines(limit: number): ChatLine[] {
   if (limit <= 0) return [];
   const files = fs
-    .readdirSync(chatDir, { withFileTypes: true })
-    .filter(entry => entry.isFile() && /^chat-\d{4}-\d{2}-\d{2}\.ndjson$/.test(entry.name))
-    .map(entry => entry.name)
+    .readdirSync(logsDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && /^run-\d{4}-\d{2}-\d{2}\.ndjson$/.test(entry.name))
+    .map((entry) => entry.name)
     .sort()
     .reverse();
   const collected: ChatLine[] = [];
   for (const file of files) {
-    const full = fs.readFileSync(path.join(chatDir, file), 'utf8');
+    const full = fs.readFileSync(path.join(logsDir, file), 'utf8');
     const rows = full.split(/\r?\n/).filter(Boolean);
     for (let i = rows.length - 1; i >= 0; i -= 1) {
       try {
-        const parsed = JSON.parse(rows[i]) as { role?: string; content?: string };
-        if (!parsed?.role || !parsed?.content) continue;
-        if (parsed.role !== 'user' && parsed.role !== 'assistant' && parsed.role !== 'system') continue;
-        collected.push({ role: parsed.role, content: parsed.content });
+        const parsed = JSON.parse(rows[i]) as { type?: string; snippet?: string; extra?: { content?: string; role?: string } };
+        if (parsed?.type !== 'user' && parsed?.type !== 'assistant') continue;
+        const role = parsed.type as 'user' | 'assistant';
+        const content = typeof parsed.snippet === 'string'
+          ? parsed.snippet
+          : typeof parsed.extra?.content === 'string'
+            ? parsed.extra.content
+            : '';
+        if (!content) continue;
+        collected.push({ role, content });
         if (collected.length >= limit) {
           return collected.reverse();
         }
@@ -296,14 +369,37 @@ export function getRecentChatLines(limit: number): ChatLine[] {
   return collected.reverse();
 }
 
+export function appendEvent(
+  type: 'user' | 'assistant' | 'op',
+  snippet: string,
+  extra: Record<string, unknown> = {},
+) {
+  const safeSnippet = truncateSnippet(snippet);
+  const entry: Record<string, unknown> = {
+    t: new Date().toISOString(),
+    type,
+    snippet: safeSnippet,
+  };
+  const extraKeys = Object.keys(extra ?? {});
+  if (extraKeys.length > 0) {
+    entry.extra = extra;
+  }
+  mkdirp(logsDir);
+  const file = path.join(logsDir, `run-${today()}.ndjson`);
+  fs.appendFileSync(file, JSON.stringify(entry) + '\n');
+}
+
 export function appendChat(role: 'user'|'assistant'|'system', content: string){
-  const f = path.join(chatDir, `chat-${today()}.ndjson`);
-  fs.appendFileSync(f, JSON.stringify({ t: new Date().toISOString(), role, content }) + '\n');
+  const type: 'user' | 'assistant' | 'op' = role === 'assistant' ? 'assistant' : role === 'user' ? 'user' : 'op';
+  const extra = role === 'system' ? { role, content: truncateSnippet(content) } : {};
+  appendEvent(type, content, extra);
 }
 
 export function appendLog(type: string, payload: Record<string, unknown>){
-  const f = path.join(logsDir, `run-${today()}.ndjson`);
-  fs.appendFileSync(f, JSON.stringify({ t: new Date().toISOString(), type, ...payload }) + '\n');
+  const details = payload ?? {};
+  const hasDetails = Object.keys(details).length > 0;
+  const snippetBase = hasDetails ? `${type} ${JSON.stringify(details)}` : type;
+  appendEvent('op', snippetBase, { event: type, ...details });
 }
 
 export function headerLine(p: Profile, rev: number){
