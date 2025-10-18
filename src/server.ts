@@ -172,6 +172,12 @@ wss.on('connection', (ws) => {
   const runHash = crypto.randomBytes(4).toString('hex');
   const st0 = readState();
   let chattyFollowUps = 0;
+  let chattyFollowUpIndex = 0;
+  const chattyFollowUpMessages = [
+    'Deeper on A or B, or move on?',
+    'Clarify X or Y, or next?',
+    'Need code, risks, or summary?',
+  ];
   send(ws, { type: 'system', text: 'ready.' });
   send(ws, { type: 'hash', value: runHash });
   send(ws, { type: 'mem', rev: st0.rev });
@@ -192,6 +198,32 @@ wss.on('connection', (ws) => {
 
     // Helper to stream deterministic replies
     type StreamOptions = { skipPostProcess?: boolean; sendSettings?: boolean };
+
+    function sendChattyFollowUp() {
+      if (chattyFollowUps >= 2) return;
+      if (chattyFollowUpMessages.length === 0) return;
+      const followUp = chattyFollowUpMessages[chattyFollowUpIndex % chattyFollowUpMessages.length];
+      chattyFollowUpIndex = (chattyFollowUpIndex + 1) % chattyFollowUpMessages.length;
+      send(ws, { type: 'assistant_start' });
+      send(ws, { type: 'assistant_chunk', text: followUp });
+      send(ws, { type: 'assistant', text: followUp });
+      appendChat('assistant', followUp);
+      chattyFollowUps += 1;
+    }
+
+    function maybeSendChattyFollowUp() {
+      const prefsNow = getPrefs();
+      if (prefsNow.chatty !== 1) {
+        chattyFollowUps = 0;
+        chattyFollowUpIndex = 0;
+        return;
+      }
+      if (chattyFollowUps >= 2) {
+        return;
+      }
+      sendChattyFollowUp();
+    }
+
     const streamReply = (reply: string, options: StreamOptions = {}) => {
       const processed = options.skipPostProcess ? reply : applyPostProcess(reply);
       send(ws, { type: 'assistant_start' });
@@ -202,6 +234,7 @@ wss.on('connection', (ws) => {
       }
       send(ws, { type: 'assistant', text: processed });
       appendChat('assistant', processed);
+      maybeSendChattyFollowUp();
     };
 
     const streamWithMem = (reply: string, options: StreamOptions = {}) => {
@@ -211,27 +244,6 @@ wss.on('connection', (ws) => {
       if (options.sendSettings) {
         sendSettingsUpdate(ws, st);
       }
-    };
-
-    const sendChattyFollowUp = () => {
-      const followUp = 'Need more depth here, or pivot elsewhere?';
-      send(ws, { type: 'assistant_start' });
-      send(ws, { type: 'assistant_chunk', text: followUp });
-      send(ws, { type: 'assistant', text: followUp });
-      appendChat('assistant', followUp);
-      chattyFollowUps += 1;
-    };
-
-    const maybeSendChattyFollowUp = () => {
-      const prefsNow = getPrefs();
-      if (prefsNow.chatty !== 1) {
-        chattyFollowUps = 0;
-        return;
-      }
-      if (chattyFollowUps >= 2) {
-        return;
-      }
-      sendChattyFollowUp();
     };
 
     // 1) Name set intent (deterministic, no model call)
@@ -605,6 +617,7 @@ wss.on('connection', (ws) => {
       const processed = applyPostProcess('unknown with current context (model error).');
       send(ws, { type: 'assistant', text: processed });
       appendChat('assistant', processed);
+      maybeSendChattyFollowUp();
       send(ws, { type: 'system', text: `openai error: ${err?.message || String(err)}` });
       appendLog('error', { where: 'openai', msg: err?.message || String(err) });
     }
