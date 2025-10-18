@@ -4,6 +4,7 @@ const input  = document.getElementById('msg');
 const sendBtn= document.getElementById('send');
 const hashEl = document.getElementById('hash');
 const memEl  = document.getElementById('mem');
+const settingsEl = document.getElementById('settings');
 
 const ws = new WebSocket(location.origin.replace(/^http/, 'ws') + '/chat');
 
@@ -51,6 +52,21 @@ ws.addEventListener('message', (ev) => {
 
   if (payload.type === 'hash')     { hashEl.textContent = 'hash: ' + payload.value; return; }
   if (payload.type === 'mem')      { memEl.textContent  = 'mem: '  + payload.rev; return; }
+  if (payload.type === 'settings') {
+    const value = payload.value || {};
+    if (settingsEl) {
+      const counts = value.rules_counts || {};
+      const prefs = value.prefs || {};
+      const summary = `settings r${value.rev ?? '--'} rs:${value.rs ?? '--'} rules:${counts.style ?? 0}/${counts.preferences ?? 0}/${counts.output ?? 0} prefs:v${prefs.verbosity ?? '--'}/t:${prefs.tone ?? '--'}/g:${prefs.guard ?? '--'}`;
+      settingsEl.textContent = summary;
+      try { settingsEl.title = JSON.stringify(value, null, 2); } catch { settingsEl.title = ''; }
+    } else {
+      const r = make('div', 'system', '[settings] ' + JSON.stringify(value));
+      logEl.appendChild(r);
+      scrollBottom();
+    }
+    return;
+  }
   if (payload.type === 'system')   { const r=make('div','system',payload.text); logEl.appendChild(r); scrollBottom(); return; }
 
   if (payload.type === 'assistant_start'){ sendBtn.disabled=true; startTyping(); return; }

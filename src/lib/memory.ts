@@ -338,10 +338,17 @@ export function listRules(): RulesStore {
   return JSON.parse(fs.readFileSync(fp, 'utf8')) as RulesStore;
 }
 
+function normalizeRuleTextInput(text: string): string {
+  if (!text) return '';
+  const collapsed = text.replace(/\s+/g, ' ').trim();
+  const withoutTrailingDot = collapsed.replace(/[.]+$/, '').trim();
+  return withoutTrailingDot;
+}
+
 export function addRule(section: string, text: string){
-  const trimmed = text.trim();
-  if (!trimmed) return;
-  if (trimmed.length > 120) {
+  const normalizedText = normalizeRuleTextInput(text);
+  if (!normalizedText) return;
+  if (normalizedText.length > 120) {
     throw new Error('Rule text too long');
   }
   const rules = ensureRules();
@@ -354,35 +361,47 @@ export function addRule(section: string, text: string){
     sec = { id, items: [] };
     rules.sections.push(sec);
   }
-  const exists = sec.items.some(item => item.toLowerCase() === trimmed.toLowerCase());
+  const exists = sec.items.some(item => item.toLowerCase() === normalizedText.toLowerCase());
   if (exists) {
     throw new Error('Duplicate rule');
   }
-  sec.items.push(trimmed);
+  sec.items.push(normalizedText);
   rules.rev += 1;
   writeRulesFile(rules);
-  appendLog('op', { op: 'RULE_ADD', section: id, text: trimmed, rev: rules.rev });
+  appendLog('op', { op: 'RULE_ADD', section: id, text: normalizedText, rev: rules.rev });
 }
 
 export function delRule(section: string, text: string){
-  const trimmed = text.trim();
-  if (!trimmed) return;
+  const normalizedText = normalizeRuleTextInput(text);
+  if (!normalizedText) return;
   const rules = ensureRules();
   const id = section.trim().toLowerCase();
   if (!id) return;
   const sec = rules.sections.find(s => s.id === id);
   if (!sec) return;
-  const idx = sec.items.findIndex(item => item.toLowerCase() === trimmed.toLowerCase());
+  const idx = sec.items.findIndex(item => item.toLowerCase() === normalizedText.toLowerCase());
   if (idx === -1) return;
   sec.items.splice(idx, 1);
   rules.rev += 1;
   writeRulesFile(rules);
-  appendLog('op', { op: 'RULE_DEL', section: id, text: trimmed, rev: rules.rev });
+  appendLog('op', { op: 'RULE_DEL', section: id, text: normalizedText, rev: rules.rev });
 }
 
 export function rulesHash(): string {
   const rules = ensureRules();
   return sha8(JSON.stringify(rules));
+}
+
+export function ruleCounts(): { style: number; preferences: number; output: number } {
+  const rules = ensureRules();
+  const counts = { style: 0, preferences: 0, output: 0 };
+  for (const section of rules.sections ?? []) {
+    const key = section.id?.toLowerCase();
+    if (key === 'style' || key === 'preferences' || key === 'output') {
+      counts[key] = section.items.length;
+    }
+  }
+  return counts;
 }
 
 export function parseNameIntent(text: string): string | null {
