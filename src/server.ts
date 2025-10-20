@@ -6,6 +6,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import OpenAI from 'openai';
+import { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 import {
   initMemory,
   ensureRules,
@@ -50,6 +51,18 @@ import {
   readProgressLast,
   readState as readProjState,
 } from './lib/project';
+import {
+  initThreads,
+  noteUser,
+  noteAssistant,
+  headerBits as threadHeader,
+  resumeBanner,
+  setActive as setActiveThread,
+  setTopic,
+  setReferent,
+  pronounHintIfAny,
+  loadThread,
+} from './lib/thread';
 
 function postProcess(
   finalText: string,
@@ -204,6 +217,7 @@ type SettingsPayload = {
   active_goal: string | null;
   plan_next: number;
   plan_hash: string | null;
+  thread: { topic: string | null; referent: string | null };
 };
 
 function buildSettingsPayload(stateOverride?: ReturnType<typeof readState>): SettingsPayload {
@@ -221,6 +235,7 @@ function buildSettingsPayload(stateOverride?: ReturnType<typeof readState>): Set
     active_goal: projState.active_goal ?? null,
     plan_next: projState.plan_cursor ?? 0,
     plan_hash: planHash,
+    thread: { topic: loadThread().topic, referent: loadThread().referent },
   };
 }
 
@@ -245,6 +260,7 @@ function hasCilantroPreferenceRule(): boolean {
 initMemory();
 ensureRules();
 initProjectFiles();
+initThreads();
 
 const app = express();
 app.use(express.static('public'));
@@ -266,11 +282,20 @@ wss.on('connection', (ws) => {
   send(ws, { type: 'mem', rev: st0.rev });
   sendSettingsUpdate(ws, st0);
 
+  const banner = resumeBanner();
+  if (banner) {
+    const text = `Resuming your last thread:\n${banner}\n\nSay: "resume" to continue, "new topic: <name>" to branch, or ask directly.`;
+    send(ws, { type: 'assistant_start' });
+    send(ws, { type: 'assistant', text });
+    noteAssistant('Resumed thread banner shown.');
+  }
+
   ws.on('message', async (data: Buffer) => {
     // normalize input
     let text = data.toString();
     try { const m = JSON.parse(text); if (typeof m?.text === 'string') text = m.text; } catch {}
 
+    noteUser(text);
     const profile = readProfile();
     const state = readState();
     const lowerText = text.trim().toLowerCase();
@@ -282,7 +307,7 @@ wss.on('connection', (ws) => {
     recordExplainIntent(text);
 
     // Helper to stream deterministic replies
-    type StreamOptions = { skipPostProcess?: boolean; sendSettings?: boolean };
+    type StreamOptions = { skipPostProcess?: boolean; sendSettings?: boolean; clarifying?: boolean };
 
     function sendChattyFollowUp() {
       if (chattyFollowUps >= 2) return;
@@ -293,6 +318,7 @@ wss.on('connection', (ws) => {
       send(ws, { type: 'assistant_chunk', text: followUp });
       send(ws, { type: 'assistant', text: followUp });
       appendChat('assistant', followUp);
+      noteAssistant(followUp);
       chattyFollowUps += 1;
     }
 
@@ -319,6 +345,7 @@ wss.on('connection', (ws) => {
       }
       send(ws, { type: 'assistant', text: processed });
       appendChat('assistant', processed);
+      noteAssistant(processed, { clarifying: options.clarifying });
       maybeSendChattyFollowUp();
     };
 
@@ -333,7 +360,7 @@ wss.on('connection', (ws) => {
 
     const streamDeterministic = (
       finalText: string,
-      options: { chunk?: string; skipPostProcess?: boolean; sendSettings?: boolean } = {},
+      options: { chunk?: string; skipPostProcess?: boolean; sendSettings?: boolean; clarifying?: boolean } = {},
     ) => {
       send(ws, { type: 'assistant_start' });
       if (options.chunk) {
@@ -342,6 +369,7 @@ wss.on('connection', (ws) => {
       const processed = options.skipPostProcess ? finalText : applyPostProcess(finalText);
       send(ws, { type: 'assistant', text: processed });
       appendChat('assistant', processed);
+      noteAssistant(processed, { clarifying: options.clarifying });
       maybeSendChattyFollowUp();
       const st = bumpState();
       send(ws, { type: 'mem', rev: st.rev });
@@ -806,14 +834,20 @@ wss.on('connection', (ws) => {
         .join('\n');
       try {
         const prompt = `${text.trim()}\n\nRecent conversation (chronological):\n${transcript}\n\nProvide a clear summary in 90-120 words.`;
+        const hint = pronounHintIfAny(text);
         const header = headerLine(profile, state.rev);
-        const pHeader = projectHeader();
-        const mergedHeader = pHeader ? `${header}|${pHeader}` : header;
+        const pHeader = projectHeader?.() || '';
+        const thHeader = threadHeader();
+        const mergedHeader = [header, pHeader, thHeader].filter(Boolean).join('|');
+        const sysMsgs: ChatCompletionMessageParam[] = [
+          { role: 'system', content: readPersona() },
+          { role: 'system', content: mergedHeader },
+        ];
+        if (hint) sysMsgs.push({ role: 'system', content: hint });
         const completion = await openai.chat.completions.create({
           model: MODEL,
           messages: [
-            { role: 'system', content: readPersona() },
-            { role: 'system', content: mergedHeader },
+            ...sysMsgs,
             { role: 'user', content: prompt },
           ],
         });
@@ -861,10 +895,46 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    {
+      const m = /^new topic:\s*(.+)$/i.exec(text);
+      if (m) {
+        setTopic(m[1]);
+        setReferent(null);
+        const trimmed = m[1].trim();
+        const msg = `Topic set to "${trimmed}".`;
+        streamDeterministic(msg, { skipPostProcess: true, sendSettings: true });
+        return;
+      }
+    }
+
+    {
+      const m = /^referent:\s*(.+)$/i.exec(text);
+      if (m) {
+        setReferent(m[1]);
+        const trimmed = m[1].trim();
+        const msg = `Referent set to "${trimmed}".`;
+        streamDeterministic(msg, { skipPostProcess: true, sendSettings: true });
+        return;
+      }
+    }
+
+    if (/^resume$/i.test(text)) {
+      const card = resumeBanner() || 'No previous thread info.';
+      streamDeterministic(card, { skipPostProcess: true });
+      return;
+    }
+
     // 8) Model path with compact header
+    const hint = pronounHintIfAny(text);
     const header = headerLine(profile, state.rev);
-    const pHeader = projectHeader();
-    const mergedHeader = pHeader ? `${header}|${pHeader}` : header;
+    const pHeader = projectHeader?.() || '';
+    const thHeader = threadHeader();
+    const mergedHeader = [header, pHeader, thHeader].filter(Boolean).join('|');
+    const sysMsgs: ChatCompletionMessageParam[] = [
+      { role: 'system', content: readPersona() },
+      { role: 'system', content: mergedHeader },
+    ];
+    if (hint) sysMsgs.push({ role: 'system', content: hint });
     send(ws, { type: 'assistant_start' });
 
     try {
@@ -872,10 +942,9 @@ wss.on('connection', (ws) => {
         model: MODEL,
         stream: true,
         messages: [
-          { role: 'system', content: readPersona() },
-          { role: 'system', content: mergedHeader },
-          { role: 'user', content: text }
-        ]
+          ...sysMsgs,
+          { role: 'user', content: text },
+        ],
       });
 
       let full = '';
@@ -889,6 +958,7 @@ wss.on('connection', (ws) => {
       const processed = applyPostProcess(full);
       send(ws, { type: 'assistant', text: processed });
       appendChat('assistant', processed);
+      noteAssistant(processed);
       const st = bumpState();
       send(ws, { type: 'mem', rev: st.rev });
       maybeSendChattyFollowUp();
@@ -897,6 +967,7 @@ wss.on('connection', (ws) => {
       const processed = applyPostProcess('unknown with current context (model error).');
       send(ws, { type: 'assistant', text: processed });
       appendChat('assistant', processed);
+      noteAssistant(processed);
       maybeSendChattyFollowUp();
       send(ws, { type: 'system', text: `openai error: ${err?.message || String(err)}` });
       appendLog('error', { where: 'openai', msg: err?.message || String(err) });
