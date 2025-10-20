@@ -4,6 +4,8 @@ const input  = document.getElementById('msg');
 const sendBtn= document.getElementById('send');
 const hashEl = document.getElementById('hash');
 const memEl  = document.getElementById('mem');
+const projEl = document.getElementById('proj');
+const planEl = document.getElementById('plan');
 const settingsEl = document.getElementById('settings');
 
 const ws = new WebSocket(location.origin.replace(/^http/, 'ws') + '/chat');
@@ -64,6 +66,19 @@ ws.addEventListener('message', (ev) => {
       const r = make('div', 'system', '[settings] ' + JSON.stringify(value));
       logEl.appendChild(r);
       scrollBottom();
+    }
+    if (projEl) {
+      const slug = value.active_goal || 'none';
+      projEl.textContent = `proj: ${slug || 'none'}`;
+    }
+    if (planEl) {
+      const next = Number(value.plan_next || 0);
+      planEl.textContent = next > 0 ? `next: #${next}` : 'next: —';
+      if (value.plan_hash) {
+        planEl.dataset.hash = value.plan_hash;
+      } else {
+        delete planEl.dataset.hash;
+      }
     }
     return;
   }

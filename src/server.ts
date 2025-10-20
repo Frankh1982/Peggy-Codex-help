@@ -30,13 +30,27 @@ import {
   rulesHash,
   ruleCounts,
   appendProgressEntry,
-  readProgressEntries,
   getRecentChatLines,
   readScratch,
   writeScratch,
   resetScratch,
   clearRuleSection,
 } from './lib/memory';
+import {
+  initProjectFiles,
+  setActiveGoal,
+  ensureGoal,
+  readPlan,
+  writePlan,
+  addPlanItem,
+  insertPlanItem,
+  markPlanDone,
+  appendCheckpoint,
+  projectCard,
+  projectHeader,
+  readProgressLast,
+  readState as readProjState,
+} from './lib/project';
 
 function postProcess(
   finalText: string,
@@ -119,15 +133,6 @@ function readPersona(): string {
   }
 }
 
-function toKebabCase(input: string): string {
-  return input
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/-{2,}/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
-
 function tidyFragment(text: string): string {
   return text.replace(/\s+/g, ' ').replace(/[\s.,!?;:]+$/g, '').trim();
 }
@@ -198,18 +203,25 @@ type SettingsPayload = {
   rs: string;
   rules_counts: SettingsCounts;
   active_goal: string | null;
+  plan_next: number;
+  plan_hash: string | null;
 };
 
 function buildSettingsPayload(stateOverride?: ReturnType<typeof readState>): SettingsPayload {
   const state = stateOverride ?? readState();
   const prefs = getPrefs();
   const counts = ruleCounts();
+  const projState = readProjState();
+  const header = projectHeader();
+  const planHash = header.split('|').find((s) => s.startsWith('ph='))?.slice(3) ?? null;
   return {
     rev: state.rev,
     prefs,
     rs: rulesHash(),
     rules_counts: counts,
-    active_goal: state.active_goal ?? null,
+    active_goal: projState.active_goal ?? null,
+    plan_next: projState.plan_cursor ?? 0,
+    plan_hash: planHash,
   };
 }
 
@@ -233,6 +245,7 @@ function hasCilantroPreferenceRule(): boolean {
 
 initMemory();
 ensureRules();
+initProjectFiles();
 
 const app = express();
 app.use(express.static('public'));
@@ -317,6 +330,21 @@ wss.on('connection', (ws) => {
       if (options.sendSettings) {
         sendSettingsUpdate(ws, st);
       }
+    };
+
+    const projectTop = () => {
+      const lines = projectCard().split('\n');
+      const planIdx = lines.findIndex((line) => line.startsWith('Plan '));
+      if (planIdx === -1) return lines.join('\n');
+      const end = Math.min(lines.length, planIdx + 2);
+      return lines.slice(0, end).join('\n');
+    };
+
+    const nextStep = () => {
+      const items = readPlan();
+      const idx = items.findIndex((it) => !it.done);
+      if (idx === -1) return null;
+      return { index: idx + 1, text: items[idx].text };
     };
 
     // 1) Name set intent (deterministic, no model call)
@@ -458,6 +486,116 @@ wss.on('connection', (ws) => {
       const payload = buildSettingsPayload();
       const json = JSON.stringify(payload, null, 2);
       streamReply(json, { skipPostProcess: true });
+      return;
+    }
+
+    const projectInit = text.match(/^project:\s*init\s+([A-Za-z0-9\- _]+)\s*-\s*(.+)$/i);
+    if (projectInit) {
+      const slugPart = projectInit[1]?.trim() ?? '';
+      const oneLine = projectInit[2]?.trim() ?? '';
+      if (!slugPart || !oneLine) {
+        streamReply('Format: project: init <slug> - <one-liner>.');
+        return;
+      }
+      ensureGoal(slugPart, oneLine);
+      writePlan([]);
+      setActiveGoal(slugPart);
+      appendCheckpoint('initialized project');
+      const activeSlug = readProjState().active_goal ?? slugPart;
+      const card = projectCard();
+      const reply = `Created project "${activeSlug}": ${oneLine}\n\n${card}`;
+      streamWithMem(reply, { skipPostProcess: true, sendSettings: true });
+      return;
+    }
+
+    const activateMatch = text.match(/^set active goal to\s+(.+)$/i);
+    if (activateMatch) {
+      const slugPart = activateMatch[1]?.trim();
+      if (!slugPart) {
+        streamReply('Provide a goal slug to activate.');
+        return;
+      }
+      setActiveGoal(slugPart);
+      const activeSlug = readProjState().active_goal ?? slugPart;
+      const reply = `Active goal set to ${activeSlug}.\n\n${projectCard()}`;
+      streamWithMem(reply, { skipPostProcess: true, sendSettings: true });
+      return;
+    }
+
+    if (/^(project:\s*show|resume project|what (are we|am i) (doing|working on)\??)$/i.test(text.trim())) {
+      const card = projectCard();
+      streamWithMem(card, { skipPostProcess: true, sendSettings: true });
+      return;
+    }
+
+    const planAdd = text.match(/^plan:\s*add\s+(.+)$/i);
+    if (planAdd) {
+      const raw = planAdd[1]?.trim();
+      if (!raw) {
+        streamReply('Provide a step to add.');
+        return;
+      }
+      addPlanItem(raw);
+      const summary = projectTop();
+      const reply = `Added: "${raw}"\n\n${summary}`;
+      streamWithMem(reply, { skipPostProcess: true, sendSettings: true });
+      return;
+    }
+
+    const planInsert = text.match(/^plan:\s*insert\s+(\d+)\s+(.+)$/i);
+    if (planInsert) {
+      const idx = Number(planInsert[1]);
+      const raw = planInsert[2]?.trim();
+      if (!raw) {
+        streamReply('Provide text to insert.');
+        return;
+      }
+      insertPlanItem(idx, raw);
+      streamWithMem(`Inserted at ${idx}.`, { skipPostProcess: true, sendSettings: true });
+      return;
+    }
+
+    const planDone = text.match(/^plan:\s*done\s+(\d+)$/i);
+    if (planDone) {
+      const idx = Number(planDone[1]);
+      markPlanDone(idx, true);
+      const upcoming = nextStep();
+      let reply = `Marked ${idx} done.`;
+      if (upcoming) {
+        reply += `\nNext: [${upcoming.index}] ${upcoming.text}`;
+      }
+      streamWithMem(reply, { skipPostProcess: true, sendSettings: true });
+      return;
+    }
+
+    if (/^plan:\s*next$/i.test(lowerText)) {
+      const upcoming = nextStep();
+      const reply = upcoming ? `Next: [${upcoming.index}] ${upcoming.text}` : 'No remaining steps.';
+      streamWithMem(reply, { skipPostProcess: true, sendSettings: true });
+      return;
+    }
+
+    const checkpointMatch = text.match(/^checkpoint:\s*(.+)$/i);
+    if (checkpointMatch) {
+      const note = checkpointMatch[1]?.trim();
+      if (!note) {
+        streamReply('Please provide a checkpoint note.');
+        return;
+      }
+      appendCheckpoint(note);
+      const recent = readProgressLast(3);
+      const lines = ['Checkpoint saved.'];
+      if (recent.length) {
+        lines.push(...recent);
+      }
+      streamWithMem(lines.join('\n'), { skipPostProcess: true, sendSettings: true });
+      return;
+    }
+
+    if (lowerText === 'list progress') {
+      const recent = readProgressLast(5);
+      const reply = recent.length ? recent.join('\n') : 'No progress logged yet.';
+      streamWithMem(reply, { skipPostProcess: true, sendSettings: true });
       return;
     }
 
@@ -658,49 +796,6 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    const activeGoalMatch = text.match(/^set active goal to\s+(.+)$/i);
-    if (activeGoalMatch) {
-      const rawGoal = activeGoalMatch[1].trim();
-      const slug = toKebabCase(rawGoal);
-      if (!slug) {
-        streamReply('Please provide a goal name to set.');
-        return;
-      }
-      const updated = {
-        ...state,
-        rev: state.rev + 1,
-        last_seen: new Date().toISOString(),
-        active_goal: slug,
-      };
-      writeState(updated);
-      appendLog('goal_set', { active_goal: slug });
-      streamReply(`Active goal set to ${slug}.`);
-      send(ws, { type: 'mem', rev: updated.rev });
-      sendSettingsUpdate(ws, updated);
-      return;
-    }
-
-    const checkpointMatch = text.match(/^checkpoint:\s*(.+)$/i);
-    if (checkpointMatch) {
-      const note = checkpointMatch[1].trim();
-      if (!note) {
-        streamReply('Please provide a checkpoint note.');
-        return;
-      }
-      appendProgressEntry(note);
-      const st = bumpState();
-      streamReply('Checkpoint saved.');
-      send(ws, { type: 'mem', rev: st.rev });
-      return;
-    }
-
-    if (lowerText === 'list progress') {
-      const entries = readProgressEntries(5);
-      const reply = entries.length ? entries.join('\n') : 'No progress logged yet.';
-      streamReply(reply, { skipPostProcess: true });
-      return;
-    }
-
     if (lowerText === 'summarize session') {
       const recent = getRecentChatLines(30).filter((line) => line.role === 'user' || line.role === 'assistant');
       if (recent.length <= 1) {
@@ -718,11 +813,14 @@ wss.on('connection', (ws) => {
         .join('\n');
       try {
         const prompt = `${text.trim()}\n\nRecent conversation (chronological):\n${transcript}\n\nProvide a clear summary in 90-120 words.`;
+        const header = headerLine(profile, state.rev);
+        const pHeader = projectHeader();
+        const mergedHeader = pHeader ? `${header}|${pHeader}` : header;
         const completion = await openai.chat.completions.create({
           model: MODEL,
           messages: [
             { role: 'system', content: readPersona() },
-            { role: 'system', content: headerLine(profile, state.rev) },
+            { role: 'system', content: mergedHeader },
             { role: 'user', content: prompt },
           ],
         });
@@ -772,6 +870,8 @@ wss.on('connection', (ws) => {
 
     // 8) Model path with compact header
     const header = headerLine(profile, state.rev);
+    const pHeader = projectHeader();
+    const mergedHeader = pHeader ? `${header}|${pHeader}` : header;
     send(ws, { type: 'assistant_start' });
 
     try {
@@ -780,7 +880,7 @@ wss.on('connection', (ws) => {
         stream: true,
         messages: [
           { role: 'system', content: readPersona() },
-          { role: 'system', content: header },
+          { role: 'system', content: mergedHeader },
           { role: 'user', content: text }
         ]
       });
