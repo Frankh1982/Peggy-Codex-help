@@ -41,7 +41,6 @@ import {
   setActiveGoal,
   ensureGoal,
   readPlan,
-  writePlan,
   addPlanItem,
   insertPlanItem,
   markPlanDone,
@@ -332,19 +331,23 @@ wss.on('connection', (ws) => {
       }
     };
 
-    const projectTop = () => {
-      const lines = projectCard().split('\n');
-      const planIdx = lines.findIndex((line) => line.startsWith('Plan '));
-      if (planIdx === -1) return lines.join('\n');
-      const end = Math.min(lines.length, planIdx + 2);
-      return lines.slice(0, end).join('\n');
-    };
-
-    const nextStep = () => {
-      const items = readPlan();
-      const idx = items.findIndex((it) => !it.done);
-      if (idx === -1) return null;
-      return { index: idx + 1, text: items[idx].text };
+    const streamDeterministic = (
+      finalText: string,
+      options: { chunk?: string; skipPostProcess?: boolean; sendSettings?: boolean } = {},
+    ) => {
+      send(ws, { type: 'assistant_start' });
+      if (options.chunk) {
+        send(ws, { type: 'assistant_chunk', text: options.chunk });
+      }
+      const processed = options.skipPostProcess ? finalText : applyPostProcess(finalText);
+      send(ws, { type: 'assistant', text: processed });
+      appendChat('assistant', processed);
+      maybeSendChattyFollowUp();
+      const st = bumpState();
+      send(ws, { type: 'mem', rev: st.rev });
+      if (options.sendSettings) {
+        sendSettingsUpdate(ws, st);
+      }
     };
 
     // 1) Name set intent (deterministic, no model call)
@@ -489,114 +492,104 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    const projectInit = text.match(/^project:\s*init\s+([A-Za-z0-9\- _]+)\s*-\s*(.+)$/i);
-    if (projectInit) {
-      const slugPart = projectInit[1]?.trim() ?? '';
-      const oneLine = projectInit[2]?.trim() ?? '';
-      if (!slugPart || !oneLine) {
-        streamReply('Format: project: init <slug> - <one-liner>.');
+    // 1) Initialize a project with one-liner goal
+    // "project: init <slug> - <one line goal>"
+    if (/^project:\s*init\s+/i.test(text)) {
+      const m = /^project:\s*init\s+([A-Za-z0-9\-_ ]+)\s*-\s*(.+)$/i.exec(text);
+      if (m) {
+        const slug = m[1];
+        const one = m[2];
+        ensureGoal(slug, one);
+        const card = projectCard();
+        const trimmed = slug.trim();
+        streamDeterministic(`Created project "${trimmed}".\n${card}`, {
+          chunk: `Created project "${trimmed}".\n`,
+          skipPostProcess: true,
+          sendSettings: true,
+        });
         return;
       }
-      ensureGoal(slugPart, oneLine);
-      writePlan([]);
-      setActiveGoal(slugPart);
-      appendCheckpoint('initialized project');
-      const activeSlug = readProjState().active_goal ?? slugPart;
+    }
+
+    // 2) Set active goal
+    // "set active goal to <slug>"
+    {
+      const m = /^set active goal to (.+)$/i.exec(text);
+      if (m) {
+        setActiveGoal(m[1]);
+        const card = projectCard();
+        streamDeterministic(card, { skipPostProcess: true, sendSettings: true, chunk: 'Active goal set.\n' });
+        return;
+      }
+    }
+
+    // 3) Show/resume project
+    if (/^(project:\s*show|resume project|what (are we|am i) (doing|working on)\??)$/i.test(text)) {
       const card = projectCard();
-      const reply = `Created project "${activeSlug}": ${oneLine}\n\n${card}`;
-      streamWithMem(reply, { skipPostProcess: true, sendSettings: true });
+      streamDeterministic(card, { skipPostProcess: true });
       return;
     }
 
-    const activateMatch = text.match(/^set active goal to\s+(.+)$/i);
-    if (activateMatch) {
-      const slugPart = activateMatch[1]?.trim();
-      if (!slugPart) {
-        streamReply('Provide a goal slug to activate.');
+    // 4) Plan operations
+    {
+      let m = /^plan:\s*add\s+(.+)$/i.exec(text);
+      if (m) {
+        addPlanItem(m[1]);
+        const card = projectCard();
+        streamDeterministic(card, {
+          chunk: `Added: "${m[1].trim()}".\n`,
+          skipPostProcess: true,
+          sendSettings: true,
+        });
         return;
       }
-      setActiveGoal(slugPart);
-      const activeSlug = readProjState().active_goal ?? slugPart;
-      const reply = `Active goal set to ${activeSlug}.\n\n${projectCard()}`;
-      streamWithMem(reply, { skipPostProcess: true, sendSettings: true });
-      return;
-    }
 
-    if (/^(project:\s*show|resume project|what (are we|am i) (doing|working on)\??)$/i.test(text.trim())) {
-      const card = projectCard();
-      streamWithMem(card, { skipPostProcess: true, sendSettings: true });
-      return;
-    }
-
-    const planAdd = text.match(/^plan:\s*add\s+(.+)$/i);
-    if (planAdd) {
-      const raw = planAdd[1]?.trim();
-      if (!raw) {
-        streamReply('Provide a step to add.');
+      m = /^plan:\s*insert\s+(\d+)\s+(.+)$/i.exec(text);
+      if (m) {
+        insertPlanItem(Number(m[1]), m[2]);
+        streamDeterministic(`Inserted at ${m[1]}.`, { skipPostProcess: true, sendSettings: true });
         return;
       }
-      addPlanItem(raw);
-      const summary = projectTop();
-      const reply = `Added: "${raw}"\n\n${summary}`;
-      streamWithMem(reply, { skipPostProcess: true, sendSettings: true });
-      return;
-    }
 
-    const planInsert = text.match(/^plan:\s*insert\s+(\d+)\s+(.+)$/i);
-    if (planInsert) {
-      const idx = Number(planInsert[1]);
-      const raw = planInsert[2]?.trim();
-      if (!raw) {
-        streamReply('Provide text to insert.');
+      m = /^plan:\s*done\s+(\d+)$/i.exec(text);
+      if (m) {
+        markPlanDone(Number(m[1]), true);
+        const nx = readProjState().plan_cursor;
+        const nxt = (nx ? readPlan()[nx - 1]?.text : null) || '—';
+        const nextLine = nx ? `[${nx}] ${nxt}` : '—';
+        streamDeterministic(`Marked ${m[1]} done. Next: ${nextLine}`, {
+          skipPostProcess: true,
+          sendSettings: true,
+        });
         return;
       }
-      insertPlanItem(idx, raw);
-      streamWithMem(`Inserted at ${idx}.`, { skipPostProcess: true, sendSettings: true });
-      return;
-    }
 
-    const planDone = text.match(/^plan:\s*done\s+(\d+)$/i);
-    if (planDone) {
-      const idx = Number(planDone[1]);
-      markPlanDone(idx, true);
-      const upcoming = nextStep();
-      let reply = `Marked ${idx} done.`;
-      if (upcoming) {
-        reply += `\nNext: [${upcoming.index}] ${upcoming.text}`;
-      }
-      streamWithMem(reply, { skipPostProcess: true, sendSettings: true });
-      return;
-    }
-
-    if (/^plan:\s*next$/i.test(lowerText)) {
-      const upcoming = nextStep();
-      const reply = upcoming ? `Next: [${upcoming.index}] ${upcoming.text}` : 'No remaining steps.';
-      streamWithMem(reply, { skipPostProcess: true, sendSettings: true });
-      return;
-    }
-
-    const checkpointMatch = text.match(/^checkpoint:\s*(.+)$/i);
-    if (checkpointMatch) {
-      const note = checkpointMatch[1]?.trim();
-      if (!note) {
-        streamReply('Please provide a checkpoint note.');
+      if (/^plan:\s*next$/i.test(text)) {
+        const nx = readProjState().plan_cursor;
+        const nxt = (nx ? readPlan()[nx - 1]?.text : null) || '—';
+        const nextLine = nx ? `[${nx}] ${nxt}` : 'No remaining steps.';
+        streamDeterministic(nx ? `Next: ${nextLine}` : 'No remaining steps.', {
+          skipPostProcess: true,
+        });
         return;
       }
-      appendCheckpoint(note);
-      const recent = readProgressLast(3);
-      const lines = ['Checkpoint saved.'];
-      if (recent.length) {
-        lines.push(...recent);
-      }
-      streamWithMem(lines.join('\n'), { skipPostProcess: true, sendSettings: true });
-      return;
     }
 
-    if (lowerText === 'list progress') {
-      const recent = readProgressLast(5);
-      const reply = recent.length ? recent.join('\n') : 'No progress logged yet.';
-      streamWithMem(reply, { skipPostProcess: true, sendSettings: true });
-      return;
+    // 5) Checkpoints & progress
+    {
+      let m = /^checkpoint:\s+(.+)$/i.exec(text);
+      if (m) {
+        appendCheckpoint(m[1]);
+        const last = readProgressLast(3).join('\n');
+        streamDeterministic(`Checkpoint saved.\n${last}`, { skipPostProcess: true });
+        return;
+      }
+
+      if (/^list progress$/i.test(text)) {
+        const last = readProgressLast(5).join('\n') || '—';
+        streamDeterministic(last, { skipPostProcess: true });
+        return;
+      }
     }
 
     if (/^what did i ask for last\??$/.test(lowerText)) {
