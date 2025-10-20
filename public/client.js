@@ -6,6 +6,7 @@ const hashEl = document.getElementById('hash');
 const memEl  = document.getElementById('mem');
 const projEl = document.getElementById('proj');
 const planEl = document.getElementById('plan');
+const threadEl = document.getElementById('thread');
 const settingsEl = document.getElementById('settings');
 
 const ws = new WebSocket(location.origin.replace(/^http/, 'ws') + '/chat');
@@ -79,6 +80,11 @@ ws.addEventListener('message', (ev) => {
       } else {
         delete planEl.dataset.hash;
       }
+    }
+    if (threadEl) {
+      const topic = value.thread?.topic && value.thread.topic.trim() ? value.thread.topic.trim() : '—';
+      const referent = value.thread?.referent && value.thread.referent.trim() ? value.thread.referent.trim() : '—';
+      threadEl.textContent = `thread: ${topic} | ref: ${referent}`;
     }
     return;
   }
