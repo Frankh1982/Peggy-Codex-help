@@ -24,7 +24,9 @@ import {
   getPrefs,
   addRule,
   delRule,
+  delRuleAt,
   listRules,
+  replaceRule,
   rulesHash,
   ruleCounts,
   appendProgressEntry,
@@ -33,6 +35,7 @@ import {
   readScratch,
   writeScratch,
   resetScratch,
+  clearRuleSection,
 } from './lib/memory';
 
 function postProcess(
@@ -479,7 +482,95 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // 6) Rules add via "remember"
+    // 6) Rules management commands
+    if (/^rules:\s*show$/i.test(lowerText)) {
+      const rules = listRules();
+      const headerLineText = `rules rev ${rules.rev} rs=${rulesHash()}`;
+      const lines = [headerLineText];
+      for (const section of rules.sections ?? []) {
+        lines.push(`${section.id}:`);
+        if (!section.items || section.items.length === 0) {
+          lines.push('- (none)');
+          continue;
+        }
+        section.items.forEach((item, idx) => {
+          lines.push(`${idx + 1}. ${item}`);
+        });
+      }
+      streamReply(lines.join('\n'), { skipPostProcess: true });
+      return;
+    }
+
+    const rulesAddCommand = text.match(/^rules:\s*add\s+([\w-]+)\s+(.+)/i);
+    if (rulesAddCommand) {
+      const section = rulesAddCommand[1];
+      const rawRule = rulesAddCommand[2];
+      const normalized = normalizeRuleInput(rawRule);
+      if (!normalized) {
+        streamReply('Please provide rule text to add.');
+        return;
+      }
+      try {
+        const targetSection = section.trim().toLowerCase();
+        addRule(targetSection, normalized);
+        appendLog('rule_add', { section: targetSection, text: normalized });
+        streamWithMem(`Added rule to ${targetSection}: "${normalized}".`, { sendSettings: true });
+      } catch (err: any) {
+        streamReply(`Could not add rule: ${err?.message || String(err)}.`);
+      }
+      return;
+    }
+
+    const rulesReplaceCommand = text.match(/^rules:\s*replace\s+([\w-]+)\s+(\d+)\s*->\s*(.+)$/i);
+    if (rulesReplaceCommand) {
+      const section = rulesReplaceCommand[1];
+      const index = Number(rulesReplaceCommand[2]);
+      const replacement = normalizeRuleInput(rulesReplaceCommand[3]);
+      if (!replacement) {
+        streamReply('Please provide replacement text.');
+        return;
+      }
+      try {
+        const result = replaceRule(section, index, replacement);
+        appendLog('rule_replace', { section: result.section, index: result.index, text: result.after });
+        streamWithMem(`Replaced rule ${result.index} in ${result.section}: "${result.after}".`, { sendSettings: true });
+      } catch (err: any) {
+        streamReply(`Could not replace rule: ${err?.message || String(err)}.`);
+      }
+      return;
+    }
+
+    const rulesDeleteCommand = text.match(/^rules:\s*(?:del|delete)\s+([\w-]+)\s+(\d+)$/i);
+    if (rulesDeleteCommand) {
+      const section = rulesDeleteCommand[1];
+      const index = Number(rulesDeleteCommand[2]);
+      try {
+        const result = delRuleAt(section, index);
+        appendLog('rule_del', { section: result.section, index: result.index, text: result.text });
+        streamWithMem(`Removed rule ${result.index} from ${result.section}.`, { sendSettings: true });
+      } catch (err: any) {
+        streamReply(`Could not delete rule: ${err?.message || String(err)}.`);
+      }
+      return;
+    }
+
+    const rulesClearCommand = text.match(/^rules:\s*clear\s+([\w-]+)$/i);
+    if (rulesClearCommand) {
+      const section = rulesClearCommand[1];
+      try {
+        const result = clearRuleSection(section);
+        if (result.removed === 0) {
+          streamReply(`No rules to clear in ${result.section}.`);
+        } else {
+          streamWithMem(`Cleared ${result.removed} rule(s) in ${result.section}.`, { sendSettings: true });
+        }
+      } catch (err: any) {
+        streamReply(`Could not clear rules: ${err?.message || String(err)}.`);
+      }
+      return;
+    }
+
+    // 7) Rules add via "remember"
     const rememberMatch = text.match(/remember that\s+(.+)/i);
     if (rememberMatch) {
       const rawRule = rememberMatch[1];
@@ -679,7 +770,7 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // 7) Model path with compact header
+    // 8) Model path with compact header
     const header = headerLine(profile, state.rev);
     send(ws, { type: 'assistant_start' });
 

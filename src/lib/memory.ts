@@ -441,6 +441,26 @@ function normalizeRuleTextInput(text: string): string {
   return withoutTrailingDot;
 }
 
+function normalizeSectionId(section: string): string {
+  return section.trim().toLowerCase();
+}
+
+function getOrCreateSection(rules: RulesStore, section: string, create: boolean): RulesSection {
+  const id = normalizeSectionId(section);
+  if (!id) {
+    throw new Error('Section id required');
+  }
+  let sec = rules.sections.find((s) => s.id === id);
+  if (!sec && create) {
+    sec = { id, items: [] };
+    rules.sections.push(sec);
+  }
+  if (!sec) {
+    throw new Error(`Section "${id}" not found`);
+  }
+  return sec;
+}
+
 export function addRule(section: string, text: string){
   const normalizedText = normalizeRuleTextInput(text);
   if (!normalizedText) return;
@@ -448,15 +468,7 @@ export function addRule(section: string, text: string){
     throw new Error('Rule text too long');
   }
   const rules = ensureRules();
-  const id = section.trim().toLowerCase();
-  if (!id) {
-    throw new Error('Section id required');
-  }
-  let sec = rules.sections.find(s => s.id === id);
-  if (!sec) {
-    sec = { id, items: [] };
-    rules.sections.push(sec);
-  }
+  const sec = getOrCreateSection(rules, section, true);
   const exists = sec.items.some(item => item.toLowerCase() === normalizedText.toLowerCase());
   if (exists) {
     throw new Error('Duplicate rule');
@@ -464,14 +476,14 @@ export function addRule(section: string, text: string){
   sec.items.push(normalizedText);
   rules.rev += 1;
   writeRulesFile(rules);
-  appendLog('op', { op: 'RULE_ADD', section: id, text: normalizedText, rev: rules.rev });
+  appendLog('op', { op: 'RULE_ADD', section: sec.id, text: normalizedText, rev: rules.rev });
 }
 
 export function delRule(section: string, text: string){
   const normalizedText = normalizeRuleTextInput(text);
   if (!normalizedText) return;
   const rules = ensureRules();
-  const id = section.trim().toLowerCase();
+  const id = normalizeSectionId(section);
   if (!id) return;
   const sec = rules.sections.find(s => s.id === id);
   if (!sec) return;
@@ -481,6 +493,82 @@ export function delRule(section: string, text: string){
   rules.rev += 1;
   writeRulesFile(rules);
   appendLog('op', { op: 'RULE_DEL', section: id, text: normalizedText, rev: rules.rev });
+}
+
+function coerceRuleIndex(index: number): number {
+  if (!Number.isFinite(index)) {
+    throw new Error('Rule index must be a number');
+  }
+  const normalized = Math.floor(index);
+  if (normalized < 1) {
+    throw new Error('Rule index must be ≥ 1');
+  }
+  return normalized;
+}
+
+export function replaceRule(section: string, index: number, text: string) {
+  const normalizedText = normalizeRuleTextInput(text);
+  if (!normalizedText) {
+    throw new Error('Replacement rule text required');
+  }
+  if (normalizedText.length > 120) {
+    throw new Error('Rule text too long');
+  }
+  const rules = ensureRules();
+  const sec = getOrCreateSection(rules, section, false);
+  const normalizedIndex = coerceRuleIndex(index);
+  const zeroIdx = normalizedIndex - 1;
+  if (!sec.items[zeroIdx]) {
+    throw new Error('Rule index out of range');
+  }
+  const before = sec.items[zeroIdx];
+  sec.items[zeroIdx] = normalizedText;
+  rules.rev += 1;
+  writeRulesFile(rules);
+  appendLog('op', {
+    op: 'RULE_REPLACE',
+    section: sec.id,
+    index: normalizedIndex,
+    before,
+    text: normalizedText,
+    rev: rules.rev,
+  });
+  return { section: sec.id, index: normalizedIndex, before, after: normalizedText };
+}
+
+export function delRuleAt(section: string, index: number) {
+  const rules = ensureRules();
+  const sec = getOrCreateSection(rules, section, false);
+  const normalizedIndex = coerceRuleIndex(index);
+  const zeroIdx = normalizedIndex - 1;
+  if (!sec.items[zeroIdx]) {
+    throw new Error('Rule index out of range');
+  }
+  const [removed] = sec.items.splice(zeroIdx, 1);
+  rules.rev += 1;
+  writeRulesFile(rules);
+  appendLog('op', {
+    op: 'RULE_DEL_INDEX',
+    section: sec.id,
+    index: normalizedIndex,
+    text: removed,
+    rev: rules.rev,
+  });
+  return { section: sec.id, index: normalizedIndex, text: removed };
+}
+
+export function clearRuleSection(section: string) {
+  const rules = ensureRules();
+  const sec = getOrCreateSection(rules, section, false);
+  if (sec.items.length === 0) {
+    return { section: sec.id, removed: 0 };
+  }
+  const removed = sec.items.length;
+  sec.items = [];
+  rules.rev += 1;
+  writeRulesFile(rules);
+  appendLog('op', { op: 'RULE_CLEAR', section: sec.id, removed, rev: rules.rev });
+  return { section: sec.id, removed };
 }
 
 export function rulesHash(): string {
