@@ -896,18 +896,6 @@ wss.on('connection', (ws) => {
     }
 
     {
-      const m = /^new topic:\s*(.+)$/i.exec(text);
-      if (m) {
-        setTopic(m[1]);
-        setReferent(null);
-        const trimmed = m[1].trim();
-        const msg = `Topic set to "${trimmed}".`;
-        streamDeterministic(msg, { skipPostProcess: true, sendSettings: true });
-        return;
-      }
-    }
-
-    {
       const m = /^referent:\s*(.+)$/i.exec(text);
       if (m) {
         setReferent(m[1]);
@@ -921,6 +909,52 @@ wss.on('connection', (ws) => {
     if (/^resume$/i.test(text)) {
       const card = resumeBanner() || 'No previous thread info.';
       streamDeterministic(card, { skipPostProcess: true });
+      return;
+    }
+
+    {
+      const m = /^(let'?s talk about|switch to|new topic:|we were talking about)\s+(.+)$/i.exec(text);
+      if (m) {
+        const topic = m[2].trim().replace(/\.$/, '');
+        setTopic(topic);
+        setReferent(topic);
+        const msg = `Topic set to "${topic}". I’ll treat "it" as ${topic}.`;
+        streamDeterministic(msg, { skipPostProcess: true, sendSettings: true });
+        return;
+      }
+    }
+
+    {
+      const m =
+        /^(look up|find)\s+(papers|articles)(?:\s+on\s+(.*))?$/i.exec(text) || /^(look up|find)\s+(?:that|this)$/i.exec(text);
+      if (m) {
+        let q = (m[3] || '').trim();
+        if (!q) {
+          const hint = pronounHintIfAny('that');
+          if (hint) q = hint.replace(/^User likely refers to:\s*/i, '');
+        }
+        if (!q) {
+          const msg = 'Unknown referent for "that". Say: new topic: <name> or referent: <thing>.';
+          streamDeterministic(msg, { skipPostProcess: true, clarifying: true });
+          return;
+        }
+        if (process.env.BRAVE_API_KEY) {
+          const msg = `Use: search: ${q}\nOr: summarize: ${q}`;
+          streamDeterministic(msg, { skipPostProcess: true });
+        } else {
+          const msg = `Web search isn’t configured. After you add BRAVE_API_KEY, say: search: ${q}`;
+          streamDeterministic(msg, { skipPostProcess: true });
+        }
+        return;
+      }
+    }
+
+    if (/^\s*(that|this|it)\s*$/i.test(text)) {
+      const hint = pronounHintIfAny(text);
+      const msg = hint
+        ? `Are you referring to ${hint.replace(/^User likely refers to:\s*/i, '')}?`
+        : 'What is "that" referring to? Say: referent: <thing>.';
+      streamDeterministic(msg, { skipPostProcess: true, clarifying: true });
       return;
     }
 
