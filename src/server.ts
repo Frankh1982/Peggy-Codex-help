@@ -132,6 +132,53 @@ function applyPostProcess(text: string): string {
   return postProcess(text, profile, prefs, rules);
 }
 
+const STOP = new Set([
+  'the',
+  'and',
+  'that',
+  'with',
+  'from',
+  'this',
+  'into',
+  'over',
+  'they',
+  'them',
+  'have',
+  'has',
+  'for',
+  'are',
+  'was',
+  'were',
+  'than',
+  'then',
+  'also',
+  'such',
+  'very',
+  'more',
+  'most',
+  'into',
+  'about',
+  'your',
+  'you',
+  'can',
+  'will',
+  'able',
+]);
+
+function topKeywords(s: string, k = 2) {
+  const words = s
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length > 4 && !STOP.has(w));
+  const freq: Record<string, number> = {};
+  for (const w of words) freq[w] = (freq[w] || 0) + 1;
+  return Object.entries(freq)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, k)
+    .map(([w]) => w);
+}
+
 const PORT = Number(process.env.PORT || 5173);
 const MODEL = process.env.MODEL || 'gpt-4o-mini';
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -271,12 +318,6 @@ wss.on('connection', (ws) => {
   const runHash = crypto.randomBytes(4).toString('hex');
   const st0 = readState();
   let chattyFollowUps = 0;
-  let chattyFollowUpIndex = 0;
-  const chattyFollowUpMessages = [
-    'Deeper on A or B, or move on?',
-    'Clarify X or Y, or next?',
-    'Need code, risks, or summary?',
-  ];
   send(ws, { type: 'system', text: 'ready.' });
   send(ws, { type: 'hash', value: runHash });
   send(ws, { type: 'mem', rev: st0.rev });
@@ -287,7 +328,7 @@ wss.on('connection', (ws) => {
     const text = `Resuming your last thread:\n${banner}\n\nSay: "resume" to continue, "new topic: <name>" to branch, or ask directly.`;
     send(ws, { type: 'assistant_start' });
     send(ws, { type: 'assistant', text });
-    noteAssistant('Resumed thread banner shown.');
+    noteAssistant(text);
   }
 
   ws.on('message', async (data: Buffer) => {
@@ -309,30 +350,31 @@ wss.on('connection', (ws) => {
     // Helper to stream deterministic replies
     type StreamOptions = { skipPostProcess?: boolean; sendSettings?: boolean; clarifying?: boolean };
 
-    function sendChattyFollowUp() {
-      if (chattyFollowUps >= 2) return;
-      if (chattyFollowUpMessages.length === 0) return;
-      const followUp = chattyFollowUpMessages[chattyFollowUpIndex % chattyFollowUpMessages.length];
-      chattyFollowUpIndex = (chattyFollowUpIndex + 1) % chattyFollowUpMessages.length;
-      send(ws, { type: 'assistant_start' });
-      send(ws, { type: 'assistant_chunk', text: followUp });
-      send(ws, { type: 'assistant', text: followUp });
-      appendChat('assistant', followUp);
-      noteAssistant(followUp);
-      chattyFollowUps += 1;
-    }
-
-    function maybeSendChattyFollowUp() {
+    function maybeSendChattyFollowUp(baseText: string, isClarifying?: boolean) {
       const prefsNow = getPrefs();
       if (prefsNow.chatty !== 1) {
         chattyFollowUps = 0;
-        chattyFollowUpIndex = 0;
         return;
       }
-      if (chattyFollowUps >= 2) {
+      if (isClarifying) {
         return;
       }
-      sendChattyFollowUp();
+      if (!baseText || !baseText.trim()) {
+        return;
+      }
+      if (chattyFollowUps >= 1) {
+        return;
+      }
+      const opts = topKeywords(baseText, 2);
+      const follow =
+        opts.length === 2
+          ? `Go deeper on ${opts[0]} or ${opts[1]}, or move on?`
+          : `Deeper on details or risks, or move on?`;
+      send(ws, { type: 'assistant_start' });
+      send(ws, { type: 'assistant', text: follow });
+      appendChat('assistant', follow);
+      noteAssistant(follow);
+      chattyFollowUps += 1;
     }
 
     const streamReply = (reply: string, options: StreamOptions = {}) => {
@@ -346,7 +388,7 @@ wss.on('connection', (ws) => {
       send(ws, { type: 'assistant', text: processed });
       appendChat('assistant', processed);
       noteAssistant(processed, { clarifying: options.clarifying });
-      maybeSendChattyFollowUp();
+      maybeSendChattyFollowUp(processed, options.clarifying);
     };
 
     const streamWithMem = (reply: string, options: StreamOptions = {}) => {
@@ -370,7 +412,7 @@ wss.on('connection', (ws) => {
       send(ws, { type: 'assistant', text: processed });
       appendChat('assistant', processed);
       noteAssistant(processed, { clarifying: options.clarifying });
-      maybeSendChattyFollowUp();
+      maybeSendChattyFollowUp(processed, options.clarifying);
       const st = bumpState();
       send(ws, { type: 'mem', rev: st.rev });
       if (options.sendSettings) {
@@ -913,9 +955,9 @@ wss.on('connection', (ws) => {
     }
 
     {
-      const m = /^(let'?s talk about|switch to|new topic:|we were talking about)\s+(.+)$/i.exec(text);
+      const m = /^(?:let'?s talk about|switch to|new topic:|we were talking about|talk about)\s+(.+?)(?:\.)?$/i.exec(text);
       if (m) {
-        const topic = m[2].trim().replace(/\.$/, '');
+        const topic = m[1].trim();
         setTopic(topic);
         setReferent(topic);
         const msg = `Topic set to "${topic}". I’ll treat "it" as ${topic}.`;
@@ -924,11 +966,19 @@ wss.on('connection', (ws) => {
       }
     }
 
+    if (/^(?:what (?:are we|am i) talking about|what (?:were we|was i) talking about|topic\??|context\??)$/i.test(text)) {
+      const card = resumeBanner() || 'No active topic.';
+      streamDeterministic(card, { skipPostProcess: true });
+      return;
+    }
+
     {
       const m =
-        /^(look up|find)\s+(papers|articles)(?:\s+on\s+(.*))?$/i.exec(text) || /^(look up|find)\s+(?:that|this)$/i.exec(text);
+        /^(?:look ?up|find|get)\s+(?:papers|articles|studies)(?:\s+on\s+(.*))?$/i.exec(text) ||
+        /^(?:look ?up|find)\s+(?:that|this|them|it)$/i.exec(text) ||
+        /^(?:give me a summary of|summarize)\s+(?:them|that|this|it)$/i.exec(text);
       if (m) {
-        let q = (m[3] || '').trim();
+        let q = (m[1] || '').trim();
         if (!q) {
           const hint = pronounHintIfAny('that');
           if (hint) q = hint.replace(/^User likely refers to:\s*/i, '');
@@ -938,18 +988,15 @@ wss.on('connection', (ws) => {
           streamDeterministic(msg, { skipPostProcess: true, clarifying: true });
           return;
         }
-        if (process.env.BRAVE_API_KEY) {
-          const msg = `Use: search: ${q}\nOr: summarize: ${q}`;
-          streamDeterministic(msg, { skipPostProcess: true });
-        } else {
-          const msg = `Web search isn’t configured. After you add BRAVE_API_KEY, say: search: ${q}`;
-          streamDeterministic(msg, { skipPostProcess: true });
-        }
+        const msg = process.env.BRAVE_API_KEY
+          ? `Use: search: ${q}\nOr: summarize: ${q}`
+          : `Web search isn’t configured. After adding BRAVE_API_KEY, say: search: ${q}`;
+        streamDeterministic(msg, { skipPostProcess: true });
         return;
       }
     }
 
-    if (/^\s*(that|this|it)\s*$/i.test(text)) {
+    if (/^\s*(that|this|it|them)\s*$/i.test(text)) {
       const hint = pronounHintIfAny(text);
       const msg = hint
         ? `Are you referring to ${hint.replace(/^User likely refers to:\s*/i, '')}?`
@@ -995,14 +1042,14 @@ wss.on('connection', (ws) => {
       noteAssistant(processed);
       const st = bumpState();
       send(ws, { type: 'mem', rev: st.rev });
-      maybeSendChattyFollowUp();
+      maybeSendChattyFollowUp(processed);
 
     } catch (err: any) {
       const processed = applyPostProcess('unknown with current context (model error).');
       send(ws, { type: 'assistant', text: processed });
       appendChat('assistant', processed);
       noteAssistant(processed);
-      maybeSendChattyFollowUp();
+      maybeSendChattyFollowUp(processed);
       send(ws, { type: 'system', text: `openai error: ${err?.message || String(err)}` });
       appendLog('error', { where: 'openai', msg: err?.message || String(err) });
     }

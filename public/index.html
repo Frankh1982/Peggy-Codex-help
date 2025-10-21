@@ -6,67 +6,109 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root { color-scheme: dark light; }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: #0f1115; color: #eaeef2; font-family: system-ui, Segoe UI, Arial; }
-    header { display:flex; justify-content:space-between; align-items:center; padding:16px 20px; font-weight:700; border-bottom:1px solid #20232b; }
-    header .badges { display:flex; align-items:center; flex-wrap:wrap; justify-content:flex-end; gap:8px; position:relative; }
-    header .badge { background:#1f2937; padding:6px 10px; border-radius:12px; font-size:12px; }
-    #settings-panel .row { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; margin:4px 0; }
-    #settings-panel button { background:#1f2937; color:#eaeef2; border:1px solid #22293a; border-radius:8px; padding:6px 10px; font-size:12px; font-weight:600; cursor:pointer; }
-    #settings-panel button:hover { background:#273246; }
-    #settings-panel .sval { font-size:12px; opacity:.75; min-width:32px; text-align:right; }
-    #wrap { display:flex; flex-direction:column; height:100vh; }
-    #log { flex:1; overflow:auto; padding: 16px 20px; }
-    .msg { max-width: 900px; margin: 8px auto; display:flex; gap:10px; }
-    .msg.user { justify-content: flex-end; }
-    .bubble { padding:12px 14px; border-radius:14px; white-space:pre-wrap; line-height:1.35 }
-    .user .bubble { background:#1c2a43; }
-    .assistant .bubble { background:#141a26; border:1px solid #22293a; }
-    .system { text-align:center; opacity:.8; font-size:12px }
-    form { display:flex; gap:10px; padding: 12px 20px; border-top:1px solid #20232b; }
-    textarea { flex:1; min-height:44px; resize:vertical; background:#111522; color:#eaeef2; border:1px solid #22293a; border-radius:10px; padding:10px }
-    button { background:#2563eb; color:white; border:0; border-radius:10px; padding:10px 16px; font-weight:600; cursor:pointer }
-    button:disabled { opacity:.6; cursor:not-allowed }
-    .typing { font-style: italic; opacity:.8; }
+    *{box-sizing:border-box}
+    body{margin:0;background:#0f1115;color:#eaeef2;font-family:system-ui,Segoe UI,Arial}
+    header{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid #20232b;position:relative}
+    .brand{font-weight:700}
+    .hud{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .pill{background:#1f2937;border-radius:999px;padding:6px 10px;font-size:12px;white-space:nowrap}
+    .btn{cursor:pointer;user-select:none}
+    #log{height:70vh;overflow:auto;padding:16px 20px}
+    .msg{max-width:900px;margin:8px auto;display:flex}
+    .msg.user{justify-content:flex-end}
+    .bubble{background:#141a26;border:1px solid #22293a;border-radius:14px;padding:12px 14px;white-space:pre-wrap;line-height:1.35}
+    .user .bubble{background:#1c2a43}
+    .system{max-width:900px;margin:8px auto;opacity:.85;font-size:12px}
+    form{display:flex;gap:8px;padding:12px 20px;border-top:1px solid #20232b}
+    textarea{flex:1;min-height:44px;resize:vertical;background:#111522;color:#eaeef2;border:1px solid #22293a;border-radius:10px;padding:10px}
+    button{background:#2563eb;color:white;border:0;border-radius:10px;padding:10px 16px;font-weight:600;cursor:pointer}
+    button:disabled{opacity:.6;cursor:not-allowed}
+
+    /* settings drawer */
+    #settings-panel{position:absolute;right:16px;top:52px;background:#0f1115;border:1px solid #22293a;border-radius:12px;padding:12px;width:360px;display:none;z-index:5}
+    #settings-panel h4{margin:0 0 8px 0}
+    .row{display:flex;align-items:center;justify-content:space-between;margin:6px 0}
+    .chip{border:1px solid #364153;border-radius:999px;padding:4px 10px;font-size:12px;cursor:pointer}
+    .chip.on{background:#243249;border-color:#4c6daf}
+    .group{display:flex;gap:6px;flex-wrap:wrap}
+    .hint{font-size:11px;opacity:.75;margin-top:6px}
   </style>
 </head>
 <body>
-  <div id="wrap">
-    <header>
-      <div>Peggy — Critical Partner</div>
-      <div class="badges">
-        <span id="hash" class="badge">run: --</span>
-        <span id="hud" class="badge">proj: none  next: —  thread: —  ref: —  prefs: v?/g:?/syc:off</span>
-        <span id="mem" class="badge">mem: --</span>
-        <span id="proj" class="badge">proj: none</span>
-        <span id="plan" class="badge">next: —</span>
-        <span id="thread" class="badge">thread: —</span>
-        <span id="ref" class="badge">ref: —</span>
-        <span id="settings" class="badge">prefs: v?/g:?/syc:off</span>
-        <div id="settings-pill" style="margin-left:8px; font-size:12px; background:#1f2937; padding:6px 10px; border-radius:12px; cursor:pointer">
-          settings
+  <header>
+    <div class="brand">Peggy — Critical Partner</div>
+    <div class="hud" id="hud">
+      <span class="pill" id="pill-proj">proj:none</span>
+      <span class="pill" id="pill-next">next:—</span>
+      <span class="pill" id="pill-thread">thread:—</span>
+      <span class="pill" id="pill-ref">ref:—</span>
+      <span class="pill" id="pill-prefs">prefs: v? t:? g:? syc:?</span>
+      <span class="pill btn" id="pill-settings">⚙️ settings</span>
+    </div>
+    <div id="settings-panel">
+      <h4>Controls</h4>
+      <div class="row">
+        <div>verbosity</div>
+        <div class="group">
+          <span class="chip" data-cmd="set verbosity to 0">v0</span>
+          <span class="chip" data-cmd="set verbosity to 1">v1</span>
+          <span class="chip" data-cmd="set verbosity to 2">v2</span>
+          <span class="chip" data-cmd="set verbosity to 3">v3</span>
         </div>
-        <div id="settings-panel" style="position:absolute; right:16px; top:54px; background:#0f1115; border:1px solid #22293a; border-radius:10px; padding:10px; width:320px; display:none">
-          <div style="font-weight:700; margin-bottom:6px">Controls</div>
-          <div class="row"><button data-cmd="set verbosity to cycle">verbosity</button><span id="s-verbosity" class="sval"></span></div>
-          <div class="row"><button data-cmd="toggle anti-sycophancy">anti-syc</button><span id="s-syc" class="sval"></span></div>
-          <div class="row"><button data-cmd="set tone to cycle">tone</button><span id="s-tone" class="sval"></span></div>
-          <div class="row"><button data-cmd="set guard to toggle">guard</button><span id="s-guard" class="sval"></span></div>
-          <div class="row"><button data-cmd="chatty toggle">chatty</button><span id="s-chatty" class="sval"></span></div>
-          <hr style="border-color:#22293a">
-          <div class="row"><button data-cmd="rules: show">rules</button><button data-cmd="rules: clear preferences" style="margin-left:6px">clear pref rules</button></div>
-          <div class="row" style="margin-top:6px"><button data-cmd="project: show">project</button><button data-cmd="plan: next" style="margin-left:6px">next</button></div>
-          <div style="font-size:11px; opacity:.75; margin-top:8px">Clicks send chat commands; no tokens are used.</div>
-        </div>
-        <span style="margin-left:8px;font-size:12px;opacity:.75">type: "what can you do?"</span>
       </div>
-    </header>
-    <div id="log"></div>
-    <form id="chat">
-      <textarea id="msg" placeholder="Ask Peggy… (Enter to send, Shift+Enter for newline)"></textarea>
-      <button id="send" type="submit">Send</button>
-    </form>
-  </div>
+      <div class="row">
+        <div>tone</div>
+        <div class="group">
+          <span class="chip" data-cmd="set tone to direct">direct</span>
+          <span class="chip" data-cmd="set tone to neutral">neutral</span>
+          <span class="chip" data-cmd="set tone to friendly">friendly</span>
+        </div>
+      </div>
+      <div class="row">
+        <div>guard</div>
+        <div class="group">
+          <span class="chip" data-cmd="set guard to strict">strict</span>
+          <span class="chip" data-cmd="set guard to normal">normal</span>
+        </div>
+      </div>
+      <div class="row">
+        <div>anti-syc</div>
+        <div class="group">
+          <span class="chip" data-cmd="toggle anti-sycophancy">toggle</span>
+        </div>
+      </div>
+      <div class="row">
+        <div>chatty</div>
+        <div class="group">
+          <span class="chip" data-cmd="chatty on">on</span>
+          <span class="chip" data-cmd="chatty off">off</span>
+        </div>
+      </div>
+      <div class="row">
+        <div>rules</div>
+        <div class="group">
+          <span class="chip" data-cmd="rules: show">show</span>
+          <span class="chip" data-cmd="rules: clear preferences">clear prefs</span>
+        </div>
+      </div>
+      <div class="row">
+        <div>project</div>
+        <div class="group">
+          <span class="chip" data-cmd="project: show">show</span>
+          <span class="chip" data-cmd="plan: next">next</span>
+        </div>
+      </div>
+      <div class="hint">Clicks send chat commands (no extra tokens).</div>
+    </div>
+  </header>
+
+  <div id="log"></div>
+
+  <form id="chat">
+    <textarea id="msg" placeholder="Ask Peggy… (Enter to send, Shift+Enter for newline)"></textarea>
+    <button id="send" type="submit">Send</button>
+  </form>
+
   <script src="/client.js"></script>
 </body>
 </html>
