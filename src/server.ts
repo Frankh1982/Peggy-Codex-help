@@ -156,27 +156,87 @@ const STOP = new Set([
   'very',
   'more',
   'most',
-  'into',
   'about',
   'your',
   'you',
   'can',
   'will',
   'able',
+  'what',
+  'which',
+  'who',
+  'whom',
+  'whose',
+  'when',
+  'where',
+  'why',
+  'how',
+  'please',
+  'thanks',
+  'thank',
+  'frank',
+  'peggy',
+  'okay',
+  'ok',
 ]);
 
-function topKeywords(s: string, k = 2) {
-  const words = s
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .filter((w) => w.length > 4 && !STOP.has(w));
+function words(s: string) {
+  return s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+}
+
+function topKeywords(text: string, k = 2) {
   const freq: Record<string, number> = {};
-  for (const w of words) freq[w] = (freq[w] || 0) + 1;
+  for (const w of words(text)) if (w.length > 3 && !STOP.has(w)) freq[w] = (freq[w] || 0) + 1;
   return Object.entries(freq)
     .sort((a, b) => b[1] - a[1])
     .slice(0, k)
     .map(([w]) => w);
+}
+
+function isQuestion(s: string) {
+  return /\?\s*$/.test(s) || /^(who|what|why|how|when|where|which)\b/i.test(s);
+}
+
+function isYesNo(s: string) {
+  return /^(is|are|do|does|did|can|could|should|would|will|has|have|had)\b.*\?$/i.test(s);
+}
+
+function detectIntent(u: string, a: string): 'explain' | 'compare' | 'howto' | 'brainstorm' {
+  if (/\bcompare|vs\.?|versus\b/i.test(u)) return 'compare';
+  if (/\bhow to|steps?|procedure|setup|implement|wire\b/i.test(u)) return 'howto';
+  if (/\bidea|brainstorm|options|approach(es)?\b/i.test(u)) return 'brainstorm';
+  const sentences = a.split(/[.!?]\s+/).filter(Boolean).length;
+  return sentences > 2 ? 'explain' : 'brainstorm';
+}
+
+function buildFollowUp(
+  lastUser: string,
+  lastAnswer: string,
+  opts: { tone: 'direct' | 'neutral' | 'friendly' },
+): string | null {
+  if (isQuestion(lastUser)) return null;
+  if (lastAnswer.split(/\s+/).length < 25) return null;
+
+  const intent = detectIntent(lastUser, lastAnswer);
+  const [a, b] = topKeywords(lastAnswer, 2);
+  const soft = opts.tone === 'friendly' ? 'Sure — ' : '';
+
+  switch (intent) {
+    case 'explain':
+      if (a && b) return `${soft}Want detail on ${a} or ${b}, or a quick summary?`;
+      return `${soft}Want more detail, or a quick summary?`;
+    case 'compare':
+      if (a && b) return `${soft}Compare ${a} vs ${b}, or jump to a recommendation?`;
+      return `${soft}Compare options, or jump to a recommendation?`;
+    case 'howto':
+      if (a && b) return `${soft}Start with step-by-step, pitfalls, or tools?`;
+      return `${soft}Start with steps, pitfalls, or tools?`;
+    case 'brainstorm':
+      if (a && b) return `${soft}Explore angles on ${a} or ${b}, or move to next actions?`;
+      return `${soft}Explore angles or move to next actions?`;
+  }
+
+  return null;
 }
 
 const PORT = Number(process.env.PORT || 5173);
@@ -317,7 +377,7 @@ const wss = new WebSocketServer({ server, path: '/chat' });
 wss.on('connection', (ws) => {
   const runHash = crypto.randomBytes(4).toString('hex');
   const st0 = readState();
-  let chattyFollowUps = 0;
+  let lastUserText = '';
   send(ws, { type: 'system', text: 'ready.' });
   send(ws, { type: 'hash', value: runHash });
   send(ws, { type: 'mem', rev: st0.rev });
@@ -340,7 +400,7 @@ wss.on('connection', (ws) => {
     const profile = readProfile();
     const state = readState();
     const lowerText = text.trim().toLowerCase();
-    chattyFollowUps = 0;
+    lastUserText = text;
 
     // Always log user msg
     appendChat('user', text);
@@ -350,31 +410,18 @@ wss.on('connection', (ws) => {
     // Helper to stream deterministic replies
     type StreamOptions = { skipPostProcess?: boolean; sendSettings?: boolean; clarifying?: boolean };
 
-    function maybeSendChattyFollowUp(baseText: string, isClarifying?: boolean) {
+    function maybeSendFollowUp(finalText: string, options: StreamOptions = {}) {
+      if (options.clarifying) return;
       const prefsNow = getPrefs();
-      if (prefsNow.chatty !== 1) {
-        chattyFollowUps = 0;
-        return;
-      }
-      if (isClarifying) {
-        return;
-      }
-      if (!baseText || !baseText.trim()) {
-        return;
-      }
-      if (chattyFollowUps >= 1) {
-        return;
-      }
-      const opts = topKeywords(baseText, 2);
-      const follow =
-        opts.length === 2
-          ? `Go deeper on ${opts[0]} or ${opts[1]}, or move on?`
-          : `Deeper on details or risks, or move on?`;
-      send(ws, { type: 'assistant_start' });
-      send(ws, { type: 'assistant', text: follow });
-      appendChat('assistant', follow);
-      noteAssistant(follow);
-      chattyFollowUps += 1;
+      if (prefsNow.chatty !== 1) return;
+      if (/^(search|summarize):/i.test(lastUserText.trim())) return;
+      const tone: 'direct' | 'neutral' | 'friendly' =
+        prefsNow.tone === 'direct' ? 'direct' : prefsNow.tone === 'friendly' ? 'friendly' : 'neutral';
+      const followUp = buildFollowUp(lastUserText, finalText, { tone });
+      if (!followUp) return;
+      send(ws, { type: 'assistant', text: followUp });
+      appendChat('assistant', followUp);
+      noteAssistant(followUp);
     }
 
     const streamReply = (reply: string, options: StreamOptions = {}) => {
@@ -388,7 +435,7 @@ wss.on('connection', (ws) => {
       send(ws, { type: 'assistant', text: processed });
       appendChat('assistant', processed);
       noteAssistant(processed, { clarifying: options.clarifying });
-      maybeSendChattyFollowUp(processed, options.clarifying);
+      maybeSendFollowUp(processed, options);
     };
 
     const streamWithMem = (reply: string, options: StreamOptions = {}) => {
@@ -412,7 +459,7 @@ wss.on('connection', (ws) => {
       send(ws, { type: 'assistant', text: processed });
       appendChat('assistant', processed);
       noteAssistant(processed, { clarifying: options.clarifying });
-      maybeSendChattyFollowUp(processed, options.clarifying);
+      maybeSendFollowUp(processed, options);
       const st = bumpState();
       send(ws, { type: 'mem', rev: st.rev });
       if (options.sendSettings) {
@@ -1042,14 +1089,14 @@ wss.on('connection', (ws) => {
       noteAssistant(processed);
       const st = bumpState();
       send(ws, { type: 'mem', rev: st.rev });
-      maybeSendChattyFollowUp(processed);
+      maybeSendFollowUp(processed);
 
     } catch (err: any) {
       const processed = applyPostProcess('unknown with current context (model error).');
       send(ws, { type: 'assistant', text: processed });
       appendChat('assistant', processed);
       noteAssistant(processed);
-      maybeSendChattyFollowUp(processed);
+      maybeSendFollowUp(processed);
       send(ws, { type: 'system', text: `openai error: ${err?.message || String(err)}` });
       appendLog('error', { where: 'openai', msg: err?.message || String(err) });
     }
