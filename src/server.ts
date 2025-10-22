@@ -50,6 +50,7 @@ import {
   projectHeader,
   readProgressLast,
   readState as readProjState,
+  nextIndex,
 } from './lib/project';
 import {
   initThreads,
@@ -63,6 +64,10 @@ import {
   pronounHintIfAny,
   loadThread,
 } from './lib/thread';
+
+function isRecipeLike(s: string) {
+  return /Ingredients/i.test(s) && /^\s*-\s+/m.test(s);
+}
 
 function postProcess(
   finalText: string,
@@ -107,15 +112,9 @@ function postProcess(
     finalText = `${profile.name} — ${finalText}`;
   }
   // no cilantro
-  const cilantroRule = has('preferences', ['never', 'cilantro']);
-  if (cilantroRule) {
+  if (has('preferences', ['never', 'cilantro']) && isRecipeLike(finalText)) {
     finalText = finalText.replace(/\b(cilantro|coriander)\b/gi, 'parsley');
-    const hasIngredientsHeading = /Ingredients/i.test(finalText);
-    const hasBulletLine = /^\s*-\s+/m.test(finalText);
-    const noteNeeded = hasIngredientsHeading && hasBulletLine;
-    if (noteNeeded && !/cilantro avoided per your preference/i.test(finalText)) {
-      finalText += '\n\n(Note: cilantro avoided per your preference; substituted with parsley.)';
-    }
+    finalText += '\n\n(Note: cilantro avoided per your preference; substituted with parsley.)';
   }
   // codex-only (no code fences)
   if (has('output', ['only', 'codex', 'no code'])) {
@@ -681,12 +680,17 @@ wss.on('connection', (ws) => {
       }
 
       if (/^plan:\s*next$/i.test(text)) {
-        const nx = readProjState().plan_cursor;
-        const nxt = (nx ? readPlan()[nx - 1]?.text : null) || '—';
-        const nextLine = nx ? `[${nx}] ${nxt}` : 'No remaining steps.';
-        streamDeterministic(nx ? `Next: ${nextLine}` : 'No remaining steps.', {
-          skipPostProcess: true,
-        });
+        const items = readPlan();
+        const idx = nextIndex(items); // 1-based, 0 = none
+        const nxt = idx ? items[idx - 1].text : null;
+        const msg = idx ? `Next: [${idx}] ${nxt}` : 'No remaining steps.';
+        send(ws, { type: 'assistant_start' });
+        send(ws, { type: 'assistant', text: msg });
+        appendChat('assistant', msg);
+        noteAssistant(msg);
+        const st = bumpState();
+        send(ws, { type: 'mem', rev: st.rev });
+        sendSettingsUpdate(ws, st);
         return;
       }
     }
