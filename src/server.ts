@@ -1025,8 +1025,8 @@ wss.on('connection', (ws) => {
         /^(?:give me a summary of|summarize)\s+(?:them|that|this|it)$/i.exec(text);
       if (m) {
         let q = (m[1] || '').trim();
-        if (!q) {
-          const hint = pronounHintIfAny('that');
+        if (!q || /^(that|this|it|them)$/i.test(q)) {
+          const hint = pronounHintIfAny(q || 'that'); // "User likely refers to: X"
           if (hint) q = hint.replace(/^User likely refers to:\s*/i, '');
         }
         if (!q) {
@@ -1037,7 +1037,10 @@ wss.on('connection', (ws) => {
         const msg = process.env.BRAVE_API_KEY
           ? `Use: search: ${q}\nOr: summarize: ${q}`
           : `Web search isn’t configured. After adding BRAVE_API_KEY, say: search: ${q}`;
-        streamDeterministic(msg, { skipPostProcess: true });
+        send(ws, { type: 'assistant_start' });
+        send(ws, { type: 'assistant', text: msg });
+        appendChat('assistant', msg);
+        noteAssistant(msg);
         return;
       }
     }
