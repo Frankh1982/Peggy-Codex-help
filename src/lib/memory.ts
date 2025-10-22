@@ -65,6 +65,18 @@ function mkdirp(p: string){ fs.mkdirSync(p, { recursive: true }); }
 function today(){ const d=new Date(); return d.toISOString().slice(0,10); }
 function sha8(s: string){ return crypto.createHash('sha256').update(s).digest('hex').slice(0,8); }
 
+function canon(s: string){
+  return s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function canonStyleRule(text: string){
+  const c = canon(text);
+  if (/(greet|use).*(my|the).*(name).*(greeting?)/.test(c) || /(always|please)?\s*(use|include)\s*my\s*name/.test(c)) {
+    return 'always greet me by name';
+  }
+  return text.trim();
+}
+
 function truncateSnippet(text: string): string {
   const trimmed = text.trim();
   if (trimmed.length <= 120) return trimmed;
@@ -469,11 +481,13 @@ export function addRule(section: string, text: string){
   }
   const rules = ensureRules();
   const sec = getOrCreateSection(rules, section, true);
-  const exists = sec.items.some(item => item.toLowerCase() === normalizedText.toLowerCase());
+  const ctext = section.toLowerCase() === 'style' ? canonStyleRule(normalizedText) : normalizedText.trim();
+  const items = sec.items || [];
+  const exists = items.some((it: string) => canon(it) === canon(ctext));
   if (exists) {
-    throw new Error('Duplicate rule');
+    throw new Error('Duplicate rule.');
   }
-  sec.items.push(normalizedText);
+  sec.items.push(ctext);
   rules.rev += 1;
   writeRulesFile(rules);
   appendLog('op', { op: 'RULE_ADD', section: sec.id, text: normalizedText, rev: rules.rev });
