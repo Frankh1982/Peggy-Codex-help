@@ -178,12 +178,17 @@ const STOP = new Set([
   'peggy',
   'okay',
   'ok',
+  'unknown',
+  'plan',
+  'prefs',
+  'project',
+  'rule',
+  'rules',
+  'settings',
 ]);
-
 function words(s: string) {
   return s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
 }
-
 function topKeywords(text: string, k = 2) {
   const freq: Record<string, number> = {};
   for (const w of words(text)) if (w.length > 3 && !STOP.has(w)) freq[w] = (freq[w] || 0) + 1;
@@ -192,15 +197,14 @@ function topKeywords(text: string, k = 2) {
     .slice(0, k)
     .map(([w]) => w);
 }
-
 function isQuestion(s: string) {
   return /\?\s*$/.test(s) || /^(who|what|why|how|when|where|which)\b/i.test(s);
 }
-
-function isYesNo(s: string) {
-  return /^(is|are|do|does|did|can|could|should|would|will|has|have|had)\b.*\?$/i.test(s);
+function adminLike(s: string) {
+  return /^(Project:|rules rev|Created project|Active goal set|Checkpoint saved|Topic set|Referent set|Cleared|Removed rule|Replaced rule)/i.test(
+    s,
+  );
 }
-
 function detectIntent(u: string, a: string): 'explain' | 'compare' | 'howto' | 'brainstorm' {
   if (/\bcompare|vs\.?|versus\b/i.test(u)) return 'compare';
   if (/\bhow to|steps?|procedure|setup|implement|wire\b/i.test(u)) return 'howto';
@@ -208,35 +212,31 @@ function detectIntent(u: string, a: string): 'explain' | 'compare' | 'howto' | '
   const sentences = a.split(/[.!?]\s+/).filter(Boolean).length;
   return sentences > 2 ? 'explain' : 'brainstorm';
 }
-
-function buildFollowUp(
-  lastUser: string,
-  lastAnswer: string,
-  opts: { tone: 'direct' | 'neutral' | 'friendly' },
-): string | null {
+function buildFollowUp(lastUser: string, lastAnswer: string, tone: 'direct' | 'neutral' | 'friendly') {
+  // **When NOT to ask**
   if (isQuestion(lastUser)) return null;
-  if (lastAnswer.split(/\s+/).length < 25) return null;
-
+  if (lastAnswer.split(/\s+/).length < 35) return null; // short answers don't need a follow-up
+  if (/unknown with current context/i.test(lastAnswer)) return null; // avoid nagging when we asked for a fetch
+  if (adminLike(lastAnswer)) return null; // admin/system-like replies
   const intent = detectIntent(lastUser, lastAnswer);
   const [a, b] = topKeywords(lastAnswer, 2);
-  const soft = opts.tone === 'friendly' ? 'Sure — ' : '';
-
+  const soft = tone === 'friendly' ? 'Sure — ' : '';
   switch (intent) {
     case 'explain':
-      if (a && b) return `${soft}Want detail on ${a} or ${b}, or a quick summary?`;
-      return `${soft}Want more detail, or a quick summary?`;
+      return a && b
+        ? `${soft}Want detail on ${a} or ${b}, or a quick summary?`
+        : `${soft}Want more detail, or a quick summary?`;
     case 'compare':
-      if (a && b) return `${soft}Compare ${a} vs ${b}, or jump to a recommendation?`;
-      return `${soft}Compare options, or jump to a recommendation?`;
+      return a && b
+        ? `${soft}Compare ${a} vs ${b}, or jump to a recommendation?`
+        : `${soft}Compare options, or jump to a recommendation?`;
     case 'howto':
-      if (a && b) return `${soft}Start with step-by-step, pitfalls, or tools?`;
       return `${soft}Start with steps, pitfalls, or tools?`;
-    case 'brainstorm':
-      if (a && b) return `${soft}Explore angles on ${a} or ${b}, or move to next actions?`;
-      return `${soft}Explore angles or move to next actions?`;
+    default:
+      return a && b
+        ? `${soft}Explore angles on ${a} or ${b}, or move to next actions?`
+        : `${soft}Explore angles or move to next actions?`;
   }
-
-  return null;
 }
 
 const PORT = Number(process.env.PORT || 5173);
@@ -412,15 +412,14 @@ wss.on('connection', (ws) => {
 
     function maybeSendFollowUp(finalText: string, options: StreamOptions = {}) {
       if (options.clarifying) return;
+      if (/^(search|summarize):/i.test(lastUserText.trim())) return;
       const prefsNow = getPrefs();
       if (prefsNow.chatty !== 1) return;
-      if (/^(search|summarize):/i.test(lastUserText.trim())) return;
       const tone: 'direct' | 'neutral' | 'friendly' =
         prefsNow.tone === 'direct' ? 'direct' : prefsNow.tone === 'friendly' ? 'friendly' : 'neutral';
-      const followUp = buildFollowUp(lastUserText, finalText, { tone });
+      const followUp = buildFollowUp(lastUserText, finalText, tone);
       if (!followUp) return;
       send(ws, { type: 'assistant', text: followUp });
-      appendChat('assistant', followUp);
       noteAssistant(followUp);
     }
 
