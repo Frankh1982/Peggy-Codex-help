@@ -63,7 +63,10 @@ import {
   setReferent,
   pronounHintIfAny,
   loadThread,
+  extractReferentFrom,
+  forceReferent,
 } from './lib/thread';
+import { webSearch, formatSources } from './tools/brave';
 
 function isRecipeLike(s: string) {
   return /Ingredients/i.test(s) && /^\s*-\s+/m.test(s);
@@ -394,6 +397,10 @@ wss.on('connection', (ws) => {
     // normalize input
     let text = data.toString();
     try { const m = JSON.parse(text); if (typeof m?.text === 'string') text = m.text; } catch {}
+
+    // opportunistic referent capture from NL (“I'm curious about …”)
+    const refMaybe = extractReferentFrom(text);
+    if (refMaybe) forceReferent(refMaybe);
 
     noteUser(text);
     const profile = readProfile();
@@ -1029,22 +1036,42 @@ wss.on('connection', (ws) => {
         /^(?:give me a summary of|summarize)\s+(?:them|that|this|it)$/i.exec(text);
       if (m) {
         let q = (m[1] || '').trim();
+        // If the user wrote "that/this/it/them" or left it blank, resolve to referent first, else topic.
         if (!q || /^(that|this|it|them)$/i.test(q)) {
-          const hint = pronounHintIfAny(q || 'that'); // "User likely refers to: X"
+          const th = loadThread();
+          q = th.referent || th.topic || q;
+        }
+        // If still unresolved, try the pronoun hint
+        if (!q || /^(that|this|it|them)$/i.test(q)) {
+          const hint = pronounHintIfAny(q || 'that');
           if (hint) q = hint.replace(/^User likely refers to:\s*/i, '');
         }
-        if (!q) {
-          const msg = 'Unknown referent for "that". Say: new topic: <name> or referent: <thing>.';
-          streamDeterministic(msg, { skipPostProcess: true, clarifying: true });
+        if (!q || /^(that|this|it|them)$/i.test(q)) {
+          send(ws, { type: 'assistant_start' });
+          const msg = 'Unknown referent for "that". Say: referent: <thing> or new topic: <name>.';
+          send(ws, { type: 'assistant', text: msg });
+          appendChat('assistant', msg);
+          noteAssistant(msg);
+          const st = bumpState();
+          send(ws, { type: 'mem', rev: st.rev });
           return;
         }
-        const msg = process.env.BRAVE_API_KEY
-          ? `Use: search: ${q}\nOr: summarize: ${q}`
-          : `Web search isn’t configured. After adding BRAVE_API_KEY, say: search: ${q}`;
-        send(ws, { type: 'assistant_start' });
-        send(ws, { type: 'assistant', text: msg });
-        appendChat('assistant', msg);
-        noteAssistant(msg);
+        // hand off to Brave handlers or guidance (Prompt B wires them)
+        if (process.env.BRAVE_API_KEY) {
+          send(ws, { type: 'assistant_start' });
+          const msg = `Use: search: ${q}\nOr: summarize: ${q}`;
+          send(ws, { type: 'assistant', text: msg });
+          appendChat('assistant', msg);
+          noteAssistant(msg);
+        } else {
+          send(ws, { type: 'assistant_start' });
+          const msg = `Web search isn’t configured. After adding BRAVE_API_KEY, say: search: ${q}`;
+          send(ws, { type: 'assistant', text: msg });
+          appendChat('assistant', msg);
+          noteAssistant(msg);
+        }
+        const st = bumpState();
+        send(ws, { type: 'mem', rev: st.rev });
         return;
       }
     }
@@ -1056,6 +1083,80 @@ wss.on('connection', (ws) => {
         : 'What is "that" referring to? Say: referent: <thing>.';
       streamDeterministic(msg, { skipPostProcess: true, clarifying: true });
       return;
+    }
+
+    {
+      const m = /^(?:search|web|lookup)\s*:\s*(.+)$/i.exec(text);
+      if (m) {
+        const q = m[1].trim();
+        try {
+          const results = await webSearch(q, 5);
+          const out = formatSources(q, results);
+          send(ws, { type: 'assistant_start' });
+          send(ws, { type: 'assistant', text: out });
+          appendChat('assistant', out);
+          noteAssistant(out);
+          const st = bumpState();
+          send(ws, { type: 'mem', rev: st.rev });
+        } catch (err: any) {
+          const msg = `brave error: ${err?.message || String(err)}`;
+          send(ws, { type: 'assistant_start' });
+          send(ws, { type: 'assistant', text: msg });
+          appendChat('assistant', msg);
+          noteAssistant(msg);
+          const st = bumpState();
+          send(ws, { type: 'mem', rev: st.rev });
+        }
+        return;
+      }
+    }
+
+    {
+      const m = /^(?:summarize|search and summarize)\s*:\s*(.+)$/i.exec(text);
+      if (m) {
+        const q = m[1].trim();
+        try {
+          const results = await webSearch(q, 5);
+          const sources = formatSources(q, results);
+          send(ws, { type: 'assistant_start' });
+          let full = '';
+          const stream = await openai.chat.completions.create({
+            model: MODEL,
+            stream: true,
+            messages: [
+              { role: 'system', content: readPersona() },
+              { role: 'system', content: headerLine(profile, state.rev) },
+              {
+                role: 'system',
+                content: 'You have web results below. Write ≤120 words and then append a numbered Sources list exactly as given.',
+              },
+              { role: 'system', content: sources },
+              { role: 'user', content: q },
+            ],
+          });
+          for await (const chunk of stream) {
+            const delta = chunk.choices?.[0]?.delta?.content || '';
+            if (!delta) continue;
+            full += delta;
+            send(ws, { type: 'assistant_chunk', text: delta });
+          }
+          if (!/https?:\/\//i.test(full)) full += '\n\n' + sources;
+          send(ws, { type: 'assistant', text: full });
+          appendChat('assistant', full);
+          noteAssistant(full);
+          const st = bumpState();
+          send(ws, { type: 'mem', rev: st.rev });
+        } catch (err: any) {
+          const msg = `brave error: ${err?.message || String(err)}`;
+          send(ws, { type: 'assistant_start' });
+          send(ws, { type: 'assistant', text: msg });
+          appendChat('assistant', msg);
+          noteAssistant(msg);
+          const st = bumpState();
+          send(ws, { type: 'mem', rev: st.rev });
+        }
+        return;
+      }
     }
 
     // 8) Model path with compact header

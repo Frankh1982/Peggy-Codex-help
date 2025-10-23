@@ -30,6 +30,10 @@ function snip(s: string, n = 120) {
 function slugify(s: string) {
   return s.toLowerCase().trim().replace(/[^\w]+/g, '-').replace(/^-+|-+$/g, '');
 }
+
+function cleanPhrase(s: string) {
+  return s.trim().replace(/\.$/, '').replace(/^(the|a|an)\s+/i, '');
+}
 function threadPath(id: string) {
   return path.join(SNAPS, `${id}.json`);
 }
@@ -113,6 +117,27 @@ export function setTopic(topic: string) {
 export function setReferent(ref: string | null) {
   const th = loadThread();
   th.referent = ref && ref.trim() ? ref.trim() : null;
+  saveThread(th);
+}
+
+export function extractReferentFrom(text: string): string | null {
+  const t = text.trim();
+  const pats = [
+    /\b(?:i(?:'| a)m|i am)\s+(?:curious|interested)\s+(?:about|in)\s+([^.?]{3,80})/i,
+    /\b(?:curious|interested)\s+(?:about|in)\s+([^.?]{3,80})/i,
+    /\b(?:tell me|talk|more)\s+about\s+([^.?]{3,80})/i,
+    /\btopic\s*:\s*([^.?]{3,80})/i,
+  ];
+  for (const re of pats) {
+    const m = re.exec(t);
+    if (m && m[1]) return cleanPhrase(m[1]);
+  }
+  return null;
+}
+
+export function forceReferent(ref: string) {
+  const th = loadThread();
+  th.referent = cleanPhrase(ref);
   saveThread(th);
 }
 
